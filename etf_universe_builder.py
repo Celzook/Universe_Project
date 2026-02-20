@@ -72,6 +72,33 @@ def find_latest_business_date(max_lookback=10):
     raise ValueError("최근 영업일을 찾을 수 없습니다.")
 
 
+def _timer(label):
+    """Step 타이머 (컨텍스트 매니저)"""
+    class Timer:
+        def __enter__(self):
+            self.t0 = time.time()
+            return self
+        def __exit__(self, *a):
+            elapsed = time.time() - self.t0
+            print(f"  ⏱️ {label}: {elapsed:.1f}초")
+    return Timer()
+
+
+def _load_cache(name):
+    path = os.path.join(Config.CACHE_DIR, name)
+    if Config.USE_CACHE and os.path.exists(path):
+        try:
+            with open(path, 'rb') as f: return pickle.load(f)
+        except Exception: pass
+    return None
+
+def _save_cache(name, data):
+    if Config.USE_CACHE:
+        os.makedirs(Config.CACHE_DIR, exist_ok=True)
+        with open(os.path.join(Config.CACHE_DIR, name), 'wb') as f:
+            pickle.dump(data, f)
+
+
 # ============================================================================
 # Step 1: 전체 ETF 티커 + 이름 (가벼움)
 # ============================================================================
@@ -80,29 +107,37 @@ def step1_get_tickers_and_names(base_date):
     print(" Step 1: 전체 ETF 티커 + 이름 수집")
     print("="*60)
 
-    tickers = stock.get_etf_ticker_list(base_date)
-    print(f"  → 전체 ETF: {len(tickers)}개")
+    with _timer("Step 1"):
+        tickers = stock.get_etf_ticker_list(base_date)
+        print(f"  → 전체 ETF: {len(tickers)}개")
 
-    # 멀티스레드로 이름 수집 (순차 대비 5~10배 빠름)
-    etf_names = {}
-    def fetch_name(t):
-        try:
-            return t, stock.get_etf_ticker_name(t)
-        except Exception:
-            return t, "N/A"
+        # 캐시 확인
+        cache_name = f"names_{base_date}.pkl"
+        cached = _load_cache(cache_name)
+        if cached and len(cached) >= len(tickers) * 0.9:
+            print(f"  → 💾 이름 캐시 로드: {len(cached)}개")
+            etf_names = cached
+        else:
+            # 멀티스레드로 이름 수집
+            etf_names = {}
+            def fetch_name(t):
+                try: return t, stock.get_etf_ticker_name(t)
+                except Exception: return t, "N/A"
 
-    with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
-        futs = {exe.submit(fetch_name, t): t for t in tickers}
-        with tqdm(total=len(tickers), desc="  이름 조회") as pbar:
-            for f in as_completed(futs):
-                t, name = f.result()
-                etf_names[t] = name
-                pbar.update(1)
+            with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
+                futs = {exe.submit(fetch_name, t): t for t in tickers}
+                with tqdm(total=len(tickers), desc="  이름 조회") as pbar:
+                    for f in as_completed(futs):
+                        t, name = f.result()
+                        etf_names[t] = name
+                        pbar.update(1)
 
-    df = pd.DataFrame({'티커': tickers,
-                        'ETF명': [etf_names.get(t, 'N/A') for t in tickers]})
-    df = df.set_index('티커')
-    print(f"  ✅ {len(df)}개 ETF 이름 수집 완료")
+            _save_cache(cache_name, etf_names)
+
+        df = pd.DataFrame({'티커': tickers,
+                            'ETF명': [etf_names.get(t, 'N/A') for t in tickers]})
+        df = df.set_index('티커')
+        print(f"  ✅ {len(df)}개 ETF 이름 수집 완료")
     return df
 
 
@@ -114,6 +149,7 @@ def step2_type_filter_and_classify(df):
     print(" Step 2: 유형 필터링 + 카테고리 분류")
     print("="*60)
 
+    t0 = time.time()
     before = len(df)
 
     def should_exclude(name):
@@ -140,6 +176,7 @@ def step2_type_filter_and_classify(df):
     df = _classify(df)
 
     print(f"\n  → {before}개 → {len(df)}개")
+    print(f"  ⏱️ Step 2: {time.time()-t0:.1f}초")
     return df
 
 
@@ -151,33 +188,91 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
     print(f" Step 3: 시가총액 수집 + {min_cap}억 이상 필터")
     print("="*60)
 
+    t0 = time.time()
     before = len(df)
 
-    # 시가총액 일괄 조회 (1회 호출)
-    try:
-        df_price = stock.get_etf_price_by_ticker(base_date)
-        print(f"  → 시세 컬럼: {df_price.columns.tolist()}")
-    except Exception as e:
-        print(f"  ⚠️  시세 일괄 실패: {e}")
-        df_price = pd.DataFrame()
+    # 캐시 확인
+    cache_name = f"mktcap_{base_date}.pkl"
+    df_price = _load_cache(cache_name)
+    if df_price is not None:
+        print(f"  → 💾 시세 캐시 로드 (컬럼: {df_price.columns.tolist()})")
+    else:
+        # 방법 1: ETF 전용 시세
+        try:
+            df_price = stock.get_etf_price_by_ticker(base_date)
+            print(f"  → [1차] get_etf_price_by_ticker 컬럼: {df_price.columns.tolist()}")
+        except Exception as e:
+            print(f"  ⚠️  [1차] ETF 시세 실패: {e}")
+            df_price = pd.DataFrame()
+
+        # 방법 2: 시가총액 컬럼이 없으면 → get_market_cap_by_ticker
+        has_cap = any(c in df_price.columns for c in ['시가총액', '순자산총액', '시총']) if not df_price.empty else False
+        if not has_cap:
+            print("  → [2차] get_market_cap_by_ticker 시도...")
+            try:
+                df_cap = stock.get_market_cap_by_ticker(base_date)
+                print(f"  → [2차] 컬럼: {df_cap.columns.tolist()}")
+                if not df_price.empty:
+                    # 기존 시세에 시가총액 합치기
+                    if '시가총액' in df_cap.columns:
+                        df_price['시가총액'] = df_cap['시가총액']
+                else:
+                    df_price = df_cap
+            except Exception as e2:
+                print(f"  ⚠️  [2차] 시가총액 실패: {e2}")
+
+        # 방법 3: 여전히 없으면 → 개별 ETF 시총 (느리지만 확실)
+        has_cap = any(c in df_price.columns for c in ['시가총액', '순자산총액', '시총']) if not df_price.empty else False
+        if not has_cap:
+            print("  → [3차] 개별 ETF 시총 수집...")
+            cap_data = {}
+            def fetch_cap(ticker):
+                try:
+                    r = stock.get_market_cap_by_date(base_date, base_date, ticker)
+                    if not r.empty and '시가총액' in r.columns:
+                        return ticker, r['시가총액'].iloc[-1]
+                except Exception: pass
+                return ticker, np.nan
+
+            with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
+                futs = {exe.submit(fetch_cap, t): t for t in df.index[:500]}
+                for f in as_completed(futs):
+                    t, v = f.result()
+                    cap_data[t] = v
+            if cap_data:
+                df_price = pd.DataFrame({'시가총액': cap_data})
+                print(f"  → [3차] {sum(1 for v in cap_data.values() if not np.isnan(v))}개 시총 수집")
+
+        if not df_price.empty:
+            _save_cache(cache_name, df_price)
 
     if not df_price.empty:
+        # 중복 컬럼 방지
+        overlap = [c for c in df_price.columns if c in df.columns and c != 'ETF명']
+        if overlap:
+            df = df.drop(columns=overlap, errors='ignore')
         df = df.join(df_price, how='left')
 
     # 시가총액 컬럼 찾기
     cap_col = None
     for c in ['시가총액', '순자산총액', '시총']:
-        if c in df.columns: cap_col = c; break
+        if c in df.columns:
+            cap_col = c
+            break
 
     if cap_col:
-        df = df[df[cap_col] >= min_cap * 1e8].copy()
+        # NaN 제거 후 필터
+        valid = df[cap_col].notna() & (df[cap_col] >= min_cap * 1e8)
+        df = df[valid].copy()
         df['시가총액(억원)'] = (df[cap_col] / 1e8).round(0).astype(int)
         for nc in ['NAV', '순자산가치', '순자산총액']:
             if nc in df.columns:
                 df['NAV(억원)'] = (df[nc] / 1e8).round(2)
                 break
+        print(f"  → 시가총액 범위: {df['시가총액(억원)'].min():,} ~ {df['시가총액(억원)'].max():,}억원")
     else:
-        print("  ⚠️  시가총액 컬럼 없음 → 필터 건너뜀")
+        print(f"  ⚠️  시가총액 컬럼 없음 → 필터 건너뜀")
+        print(f"  → 현재 컬럼: {df.columns.tolist()}")
 
     print(f"  → {before}개 → {len(df)}개 (시총 {min_cap}억+ 필터)")
 
@@ -188,6 +283,7 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
         for idx, row in etc.iterrows():
             print(f"    - {idx} {row['ETF명']}")
 
+    print(f"  ⏱️ Step 3: {time.time()-t0:.1f}초")
     return df
 
 
@@ -199,20 +295,30 @@ def step4_collect_all_data(df, base_date):
     print(f" Step 4: 가격 / 상장일 / 구성종목 수집 ({len(df)}개 ETF)")
     print("="*60)
 
+    t0_total = time.time()
     tickers = df.index.tolist()
 
     # 4-A: 가격 + KOSPI
+    t0 = time.time()
     df, df_close, kospi_close = _collect_prices(df, tickers, base_date)
+    print(f"  ⏱️ Step 4-A (가격): {time.time()-t0:.1f}초")
 
     # 4-B: 설정일
+    t0 = time.time()
     df = _collect_listing_dates(df, tickers, base_date)
+    print(f"  ⏱️ Step 4-B (설정일): {time.time()-t0:.1f}초")
 
     # 4-C: PDF → 별도 df_pdf
+    t0 = time.time()
     df_pdf = _collect_pdf_holdings(df, tickers, base_date)
+    print(f"  ⏱️ Step 4-C (PDF): {time.time()-t0:.1f}초")
 
     # 4-D: 수익률 / BM / 순위
+    t0 = time.time()
     df = _calc_returns(df, df_close, kospi_close, base_date)
+    print(f"  ⏱️ Step 4-D (수익률): {time.time()-t0:.1f}초")
 
+    print(f"  ⏱️ Step 4 전체: {time.time()-t0_total:.1f}초")
     return df, df_close, df_pdf
 
 
@@ -874,10 +980,13 @@ def step5_save(df, df_close, df_pdf, base_date):
 # ============================================================================
 def build_universe():
     print("╔" + "═"*58 + "╗")
-    print("║   한국 상장 ETF 유니버스 빌더 v5.2                        ║")
+    print("║   한국 상장 ETF 유니버스 빌더 v5.3                       ║")
     print("╚" + "═"*58 + "╝")
 
+    t_start = time.time()
+
     base_date = Config.BASE_DATE or find_latest_business_date()
+    Config.BASE_DATE = base_date    # 저장
     print(f"\n  📅 기준일: {base_date}")
     print(f"  💰 최소 시총: {Config.MIN_MARKET_CAP_BILLIONS}억원")
     print(f"  ⚡ 스레드: {Config.MAX_WORKERS} / 캐시: {Config.USE_CACHE}")
@@ -888,7 +997,7 @@ def build_universe():
     # Step 2: 가벼운 — 유형 필터 (키워드)
     df = step2_type_filter_and_classify(df)
 
-    # Step 3: 중간 — 시총 데이터 → 100억 필터
+    # Step 3: 중간 — 시총 데이터 → 필터
     df = step3_market_cap_filter(df, base_date, Config.MIN_MARKET_CAP_BILLIONS)
 
     # Step 4: 무거운 — 최종 리스트에만 가격/상장일/PDF
@@ -897,9 +1006,10 @@ def build_universe():
     # Step 5: 저장
     step5_save(df, df_close, df_pdf, base_date)
 
-    print("\n" + "="*60)
-    print(" ✅ 완료!")
-    print("="*60)
+    elapsed = time.time() - t_start
+    print(f"\n{'='*60}")
+    print(f" ✅ 완료! 총 소요시간: {elapsed:.0f}초 ({elapsed/60:.1f}분)")
+    print(f"{'='*60}")
     return df, df_close, df_pdf
 
 
