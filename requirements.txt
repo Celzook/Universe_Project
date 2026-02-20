@@ -1,0 +1,8 @@
+pykrx
+pandas
+numpy
+openpyxl
+tqdm
+yfinance
+streamlit
+plotly
