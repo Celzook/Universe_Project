@@ -191,95 +191,111 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
     t0 = time.time()
     before = len(df)
 
-    # 캐시 확인
-    cache_name = f"mktcap_{base_date}.pkl"
-    df_price = _load_cache(cache_name)
-    if df_price is not None:
-        print(f"  → 💾 시세 캐시 로드 (컬럼: {df_price.columns.tolist()})")
-    else:
-        # 방법 1: ETF 전용 시세
+    # 캐시 확인 (v2 — 이전 캐시 무시)
+    cache_name = f"mktcap_v2_{base_date}.pkl"
+    cached = _load_cache(cache_name)
+    if cached is not None and '시가총액(억원)' in cached.columns:
+        print(f"  → 💾 시총 캐시 로드: {len(cached)}개")
+        df = df.join(cached[['시가총액(억원)', 'NAV(억원)']].dropna(how='all'), how='left')
+        df = df[df['시가총액(억원)'].notna() & (df['시가총액(억원)'] >= min_cap)].copy()
+        df['시가총액(억원)'] = df['시가총액(억원)'].astype(int)
+        print(f"  → {before}개 → {len(df)}개")
+        print(f"  ⏱️ Step 3: {time.time()-t0:.1f}초")
+        return df
+
+    # ── 시가총액 수집 ──
+    cap_series = pd.Series(dtype=float, name='시가총액')
+    nav_series = pd.Series(dtype=float, name='NAV')
+
+    # 방법 1: get_etf_price_by_ticker (ETF 전용)
+    print("  → [1차] get_etf_price_by_ticker...")
+    try:
+        df_etf = stock.get_etf_price_by_ticker(base_date)
+        print(f"    컬럼: {df_etf.columns.tolist()}")
+        print(f"    행 수: {len(df_etf)}, 샘플 인덱스: {df_etf.index[:3].tolist()}")
+
+        # 시가총액 컬럼 찾기 (다양한 이름)
+        for c in df_etf.columns:
+            cl = str(c).replace(' ','')
+            if '시가총액' in cl or '시총' in cl:
+                cap_series = df_etf[c]; print(f"    ✅ 시총 컬럼: '{c}'"); break
+            if '순자산' in cl or 'NAV' in cl.upper():
+                nav_series = df_etf[c]; print(f"    ✅ NAV 컬럼: '{c}'")
+
+        # 종가/거래량도 여기서 가져올 수 있음
+        for c in df_etf.columns:
+            if '종가' in str(c) and '종가' not in df.columns:
+                df = df.join(df_etf[[c]], how='left')
+            if '거래량' in str(c) and '거래량' not in df.columns:
+                df = df.join(df_etf[[c]], how='left')
+    except Exception as e:
+        print(f"    ⚠️ 실패: {e}")
+
+    # 방법 2: get_market_cap_by_ticker (주식 시총 — ETF도 포함될 수 있음)
+    if cap_series.empty or cap_series.isna().all():
+        print("  → [2차] get_market_cap_by_ticker...")
         try:
-            df_price = stock.get_etf_price_by_ticker(base_date)
-            print(f"  → [1차] get_etf_price_by_ticker 컬럼: {df_price.columns.tolist()}")
+            df_mc = stock.get_market_cap_by_ticker(base_date)
+            print(f"    컬럼: {df_mc.columns.tolist()}, 행: {len(df_mc)}")
+            # ETF 인덱스와 겹치는지 확인
+            overlap = set(df.index) & set(df_mc.index)
+            print(f"    ETF와 겹치는 티커: {len(overlap)}개")
+            if len(overlap) > 0 and '시가총액' in df_mc.columns:
+                cap_series = df_mc['시가총액']
+                print(f"    ✅ 시총 확보: {cap_series.notna().sum()}개")
         except Exception as e:
-            print(f"  ⚠️  [1차] ETF 시세 실패: {e}")
-            df_price = pd.DataFrame()
+            print(f"    ⚠️ 실패: {e}")
 
-        # 방법 2: 시가총액 컬럼이 없으면 → get_market_cap_by_ticker
-        has_cap = any(c in df_price.columns for c in ['시가총액', '순자산총액', '시총']) if not df_price.empty else False
-        if not has_cap:
-            print("  → [2차] get_market_cap_by_ticker 시도...")
+    # 방법 3: 개별 ETF (느리지만 확실)
+    if cap_series.empty or cap_series.isna().all():
+        print("  → [3차] 개별 ETF 시총 수집...")
+        cap_data = {}
+        def fetch_cap(ticker):
             try:
-                df_cap = stock.get_market_cap_by_ticker(base_date)
-                print(f"  → [2차] 컬럼: {df_cap.columns.tolist()}")
-                if not df_price.empty:
-                    # 기존 시세에 시가총액 합치기
-                    if '시가총액' in df_cap.columns:
-                        df_price['시가총액'] = df_cap['시가총액']
-                else:
-                    df_price = df_cap
-            except Exception as e2:
-                print(f"  ⚠️  [2차] 시가총액 실패: {e2}")
+                r = stock.get_market_cap_by_date(base_date, base_date, ticker)
+                if not r.empty and '시가총액' in r.columns:
+                    return ticker, r['시가총액'].iloc[-1]
+            except Exception: pass
+            return ticker, np.nan
 
-        # 방법 3: 여전히 없으면 → 개별 ETF 시총 (느리지만 확실)
-        has_cap = any(c in df_price.columns for c in ['시가총액', '순자산총액', '시총']) if not df_price.empty else False
-        if not has_cap:
-            print("  → [3차] 개별 ETF 시총 수집...")
-            cap_data = {}
-            def fetch_cap(ticker):
-                try:
-                    r = stock.get_market_cap_by_date(base_date, base_date, ticker)
-                    if not r.empty and '시가총액' in r.columns:
-                        return ticker, r['시가총액'].iloc[-1]
-                except Exception: pass
-                return ticker, np.nan
-
-            with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
-                futs = {exe.submit(fetch_cap, t): t for t in df.index[:500]}
+        with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
+            futs = {exe.submit(fetch_cap, t): t for t in df.index}
+            with tqdm(total=len(df), desc="  시총 수집") as pbar:
                 for f in as_completed(futs):
                     t, v = f.result()
                     cap_data[t] = v
-            if cap_data:
-                df_price = pd.DataFrame({'시가총액': cap_data})
-                print(f"  → [3차] {sum(1 for v in cap_data.values() if not np.isnan(v))}개 시총 수집")
+                    pbar.update(1)
+        cap_series = pd.Series(cap_data, name='시가총액')
+        ok = cap_series.notna().sum()
+        print(f"    ✅ 개별 수집: {ok}/{len(df)}개")
 
-        if not df_price.empty:
-            _save_cache(cache_name, df_price)
-
-    if not df_price.empty:
-        # 중복 컬럼 방지
-        overlap = [c for c in df_price.columns if c in df.columns and c != 'ETF명']
-        if overlap:
-            df = df.drop(columns=overlap, errors='ignore')
-        df = df.join(df_price, how='left')
-
-    # 시가총액 컬럼 찾기
-    cap_col = None
-    for c in ['시가총액', '순자산총액', '시총']:
-        if c in df.columns:
-            cap_col = c
-            break
-
-    if cap_col:
-        # NaN 제거 후 필터
-        valid = df[cap_col].notna() & (df[cap_col] >= min_cap * 1e8)
+    # ── 시가총액 적용 ──
+    if not cap_series.empty and cap_series.notna().any():
+        df['_시가총액_raw'] = cap_series
+        valid = df['_시가총액_raw'].notna() & (df['_시가총액_raw'] >= min_cap * 1e8)
         df = df[valid].copy()
-        df['시가총액(억원)'] = (df[cap_col] / 1e8).round(0).astype(int)
-        for nc in ['NAV', '순자산가치', '순자산총액']:
-            if nc in df.columns:
-                df['NAV(억원)'] = (df[nc] / 1e8).round(2)
-                break
+        df['시가총액(억원)'] = (df['_시가총액_raw'] / 1e8).round(0).astype(int)
+        df = df.drop(columns=['_시가총액_raw'], errors='ignore')
+
+        if not nav_series.empty and nav_series.notna().any():
+            df['NAV(억원)'] = (nav_series.reindex(df.index) / 1e8).round(2)
+
         print(f"  → 시가총액 범위: {df['시가총액(억원)'].min():,} ~ {df['시가총액(억원)'].max():,}억원")
+
+        # 캐시 저장
+        cache_df = df[['시가총액(억원)']].copy()
+        if 'NAV(억원)' in df.columns:
+            cache_df['NAV(억원)'] = df['NAV(억원)']
+        _save_cache(cache_name, cache_df)
     else:
-        print(f"  ⚠️  시가총액 컬럼 없음 → 필터 건너뜀")
-        print(f"  → 현재 컬럼: {df.columns.tolist()}")
+        print(f"  ⚠️ 시가총액 수집 실패 — 필터 건너뜀")
 
     print(f"  → {before}개 → {len(df)}개 (시총 {min_cap}억+ 필터)")
 
-    # 기타 카테고리 체크
+    # 기타 카테고리
     etc = df[df['대카테고리'] == '기타']
     if len(etc) > 0:
-        print(f"\n  ⚠️  [기타 분류: {len(etc)}개 — 수동 확인]")
+        print(f"\n  ⚠️ [기타: {len(etc)}개]")
         for idx, row in etc.iterrows():
             print(f"    - {idx} {row['ETF명']}")
 
