@@ -315,7 +315,6 @@ def _render_stock_analysis_charts(chart_data, stock_name, df_uni):
               '1Y': 'BM_1Y(%)', 'YTD': 'BM_YTD(%)'}
     available_bm = {k: v for k, v in bm_all.items() if v in chart_data.columns}
 
-    # ── [기능3] BM 기간 선택 ──
     if available_bm:
         sel_periods = st.multiselect(
             "📅 BM 성과 기간 선택",
@@ -326,7 +325,17 @@ def _render_stock_analysis_charts(chart_data, stock_name, df_uni):
     else:
         sel_periods = []
 
-    labels = chart_data['ETF명'].str[:15].tolist()
+    # ── 라벨 중복 방지: 티커 접미사 추가 ──
+    raw_labels = chart_data['ETF명'].str[:15].tolist()
+    tickers = chart_data.index.tolist()
+    seen = {}
+    labels = []
+    for lbl, tk in zip(raw_labels, tickers):
+        if lbl in seen:
+            labels.append(f"{lbl}({tk[-4:]})")
+        else:
+            labels.append(lbl)
+        seen[lbl] = seen.get(lbl, 0) + 1
     chart_h = max(400, len(labels) * 26)  # 동일 높이
 
     col1, col2, col3 = st.columns(3)
