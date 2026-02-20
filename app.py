@@ -1,37 +1,26 @@
 """
 ==============================================================================
- ETF Universe Explorer — Streamlit Cloud App
-==============================================================================
- pip install -r requirements.txt
- 로컬: streamlit run app.py
- 클라우드: GitHub → Streamlit Cloud 배포
+ ETF Universe Explorer — Streamlit Cloud App v2
 ==============================================================================
 """
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import threading
-import gc
+import threading, gc
 
-st.set_page_config(
-    page_title="ETF Universe Explorer",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="ETF Universe Explorer", page_icon="📊",
+                   layout="wide", initial_sidebar_state="expanded")
 
 from etf_universe_builder import build_universe, Config
 from global_price_collector import (
-    collect_global_prices, calc_period_return,
-    GLOBAL_INDICES, US_ETFS
+    collect_global_prices, calc_period_return, GLOBAL_INDICES, US_ETFS
 )
 
 # ============================================================================
-# 캐시 — 같은 파라미터면 재빌드 안 함 (6시간 TTL)
+# 캐시
 # ============================================================================
 @st.cache_data(ttl=3600*6, show_spinner=False)
 def cached_build_universe(min_cap, top_n):
@@ -64,6 +53,50 @@ def init_session():
 init_session()
 
 # ============================================================================
+# 공통 위젯: PDF 구성종목 비교 (최대 3개 ETF)
+# ============================================================================
+def render_pdf_comparison(selected_tickers, df_pdf, df_uni, key_prefix="comp"):
+    """선택된 ETF들의 PDF 구성종목을 가로 비교로 표시"""
+    if not selected_tickers or df_pdf is None:
+        return
+
+    n = min(len(selected_tickers), 3)
+    tickers = selected_tickers[:n]
+
+    st.markdown("---")
+    st.subheader(f"🔬 PDF 구성종목 비교 ({n}개 ETF)")
+
+    cols = st.columns(n)
+    for i, ticker in enumerate(tickers):
+        with cols[i]:
+            name = df_uni.at[ticker, 'ETF명'] if ticker in df_uni.index else ticker
+            cap = ''
+            if ticker in df_uni.index and '시가총액(억원)' in df_uni.columns:
+                c = df_uni.at[ticker, '시가총액(억원)']
+                if pd.notna(c) and c != '':
+                    cap = f" | {int(c):,}억"
+            st.markdown(f"**{name}**{cap}")
+
+            if ticker in df_pdf.index:
+                row = df_pdf.loc[ticker].drop('ETF명', errors='ignore')
+                vals = pd.to_numeric(row, errors='coerce')
+                valid = vals.dropna().sort_values(ascending=False).head(10)
+
+                if not valid.empty:
+                    tbl = pd.DataFrame({
+                        '종목': valid.index,
+                        '비중(%)': [f"{v:.1f}" for v in valid.values]
+                    }).reset_index(drop=True)
+                    tbl.index = tbl.index + 1
+                    tbl.index.name = '#'
+                    st.dataframe(tbl, use_container_width=True, height=390)
+                else:
+                    st.caption("구성종목 없음 (해외 ETF 등)")
+            else:
+                st.caption("PDF 데이터 없음")
+
+
+# ============================================================================
 # 사이드바
 # ============================================================================
 def render_sidebar():
@@ -71,8 +104,7 @@ def render_sidebar():
     st.sidebar.markdown("---")
 
     st.sidebar.subheader("1️⃣ 유니버스 구축")
-    min_cap = st.sidebar.number_input("최소 시가총액 (억원)", value=200, step=50,
-                                       help="클라우드: 200억+ 권장")
+    min_cap = st.sidebar.number_input("최소 시가총액 (억원)", value=200, step=50)
     top_n = st.sidebar.number_input("PDF Top N", value=10, min_value=5, max_value=20)
 
     if st.sidebar.button("🚀 유니버스 빌드", type="primary", use_container_width=True):
@@ -98,9 +130,6 @@ def render_sidebar():
     return st.sidebar.radio("📌 메뉴", ["유니버스 탐색", "구성종목(PDF) 분석", "수익률 비교"],
                             label_visibility="collapsed")
 
-# ============================================================================
-# 유니버스 빌드
-# ============================================================================
 def run_universe_build(min_cap, top_n):
     with st.spinner("유니버스 빌드 중... (첫 실행 3~8분, 이후 캐시)"):
         try:
@@ -132,6 +161,7 @@ def start_global_collection():
             st.session_state.global_loading = False
     threading.Thread(target=_collect, daemon=True).start()
 
+
 # ============================================================================
 # 페이지 1: 유니버스 탐색
 # ============================================================================
@@ -139,12 +169,12 @@ def page_universe():
     st.title("📊 ETF 유니버스 탐색")
     if not st.session_state.universe_built:
         st.info("👈 사이드바에서 **🚀 유니버스 빌드** 버튼을 누르세요.")
-        st.markdown("1. 최소 시가총액 설정 (기본 200억)\n2. 빌드 클릭\n3. 글로벌 데이터 자동 수집\n4. 분석 시작")
         return
 
     df = st.session_state.df_universe.copy()
+    df_pdf = st.session_state.df_pdf
 
-    # 필터
+    # ── 필터 ──
     col1, col2, col3 = st.columns(3)
     with col1:
         cats = ['전체'] + sorted(df['대카테고리'].dropna().unique().tolist()) if '대카테고리' in df.columns else ['전체']
@@ -162,54 +192,81 @@ def page_universe():
     if sel_mid != '전체': df = df[df['중카테고리'] == sel_mid]
     if search: df = df[df['ETF명'].str.contains(search, case=False, na=False)]
 
-    # 메트릭
+    # ── 메트릭 ──
     m1, m2, m3, m4 = st.columns(4)
-    cap = df['시가총액(억원)'].sum() if '시가총액(억원)' in df.columns else 0
-    m1.metric("총 시가총액", f"{cap/10000:.1f}조원")
+    has_cap = '시가총액(억원)' in df.columns and df['시가총액(억원)'].notna().any()
+    cap_total = df['시가총액(억원)'].sum() if has_cap else 0
+    m1.metric("총 시가총액", f"{cap_total/10000:.1f}조원" if has_cap else "N/A")
     m2.metric("ETF 수", f"{len(df)}개")
     m3.metric("평균 YTD", f"{df['수익률_YTD(%)'].mean():+.2f}%" if '수익률_YTD(%)' in df.columns else "N/A")
     m4.metric("평균 BM(YTD)", f"{df['BM_YTD(%)'].mean():+.2f}%" if 'BM_YTD(%)' in df.columns else "N/A")
 
-    # 테이블
-    cols = [c for c in ['ETF명','시가총액(억원)','NAV(억원)','설정일',
+    # ── 데이터 테이블 ──
+    display_cols = [c for c in [
+        'ETF명','시가총액(억원)','NAV(억원)','설정일',
         '대카테고리','중카테고리','소카테고리','순위(YTD_BM+)',
         '수익률_1M(%)','수익률_3M(%)','수익률_6M(%)','수익률_1Y(%)','수익률_YTD(%)',
         'BM_1M(%)','BM_3M(%)','BM_6M(%)','BM_1Y(%)','BM_YTD(%)',
-        '연간변동성(%)','종가','거래량'] if c in df.columns]
-    st.dataframe(df[cols], use_container_width=True, height=600)
+        '연간변동성(%)','종가','거래량'
+    ] if c in df.columns]
 
-    # 차트
-    ca, cb = st.columns(2)
-    with ca:
-        if '대카테고리' in df.columns and '시가총액(억원)' in df.columns:
-            cc = df.groupby('대카테고리')['시가총액(억원)'].sum().sort_values(ascending=True)
-            fig = px.bar(x=cc.values, y=cc.index, orientation='h', labels={'x':'시총(억)','y':''},
-                        color=cc.values, color_continuous_scale='Viridis')
-            fig.update_layout(height=350, showlegend=False, coloraxis_showscale=False,
-                            margin=dict(l=0,r=0,t=30,b=0))
-            st.plotly_chart(fig, use_container_width=True)
-    with cb:
-        if '대카테고리' in df.columns:
-            cc = df['대카테고리'].value_counts()
-            fig = px.pie(values=cc.values, names=cc.index, hole=0.4)
-            fig.update_layout(height=350, margin=dict(l=0,r=0,t=30,b=0))
-            st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(df[display_cols], use_container_width=True, height=500)
 
-    # BM 상하위
+    # ── [기능 1] ETF 선택 → PDF 비교 ──
+    etf_options = [f"{t} | {df.at[t,'ETF명'][:30]}" for t in df.index]
+    selected = st.multiselect("🔬 PDF 구성종목 비교 (최대 3개 ETF 선택)",
+                              etf_options, max_selections=3, key="uni_pdf_comp")
+    if selected:
+        sel_tickers = [s.split(' | ')[0] for s in selected]
+        render_pdf_comparison(sel_tickers, df_pdf, df, key_prefix="uni")
+
+    # ── 카테고리별 시가총액 바 차트 ──
+    if has_cap:
+        st.markdown("---")
+        st.subheader("📊 카테고리별 시가총액")
+        cc = df.groupby('대카테고리')['시가총액(억원)'].sum().sort_values(ascending=True)
+        fig = px.bar(x=cc.values, y=cc.index, orientation='h',
+                    labels={'x':'시총(억)','y':''},
+                    color=cc.values, color_continuous_scale='Viridis')
+        fig.update_layout(height=350, showlegend=False, coloraxis_showscale=False,
+                        margin=dict(l=0,r=0,t=30,b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── BM 상위/하위 ──
     if 'BM_YTD(%)' in df.columns and len(df) > 0:
         st.subheader("📈 BM(YTD) 상위/하위 15")
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**🟢 상위**")
-            st.dataframe(df.nlargest(15,'BM_YTD(%)')[['ETF명','대카테고리','BM_YTD(%)','수익률_YTD(%)']].reset_index(),
+            top_cols = ['ETF명','대카테고리','BM_YTD(%)','수익률_YTD(%)']
+            if has_cap: top_cols.insert(1, '시가총액(억원)')
+            st.dataframe(df.nlargest(15,'BM_YTD(%)')[top_cols].reset_index(),
                         use_container_width=True, hide_index=True)
         with c2:
             st.markdown("**🔴 하위**")
-            st.dataframe(df.nsmallest(15,'BM_YTD(%)')[['ETF명','대카테고리','BM_YTD(%)','수익률_YTD(%)']].reset_index(),
+            st.dataframe(df.nsmallest(15,'BM_YTD(%)')[top_cols].reset_index(),
                         use_container_width=True, hide_index=True)
 
+    # ── [기능 3] 도넛차트 맨 아래 ──
+    if '대카테고리' in df.columns:
+        st.markdown("---")
+        st.subheader("🍩 카테고리 분포")
+        c1, c2 = st.columns(2)
+        with c1:
+            cc = df['대카테고리'].value_counts()
+            fig = px.pie(values=cc.values, names=cc.index, hole=0.4, title="ETF 수 기준")
+            fig.update_layout(height=350, margin=dict(l=0,r=0,t=40,b=0))
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            if has_cap:
+                cc2 = df.groupby('대카테고리')['시가총액(억원)'].sum()
+                fig2 = px.pie(values=cc2.values, names=cc2.index, hole=0.4, title="시가총액 기준")
+                fig2.update_layout(height=350, margin=dict(l=0,r=0,t=40,b=0))
+                st.plotly_chart(fig2, use_container_width=True)
+
+
 # ============================================================================
-# 페이지 2: PDF 분석
+# 페이지 2: 구성종목(PDF) 분석
 # ============================================================================
 def page_pdf():
     st.title("🧬 구성종목(PDF) 분석")
@@ -222,6 +279,7 @@ def page_pdf():
     if not stock_cols:
         st.warning("구성종목 데이터가 없습니다."); return
 
+    # ── 종목 검색 ──
     st.subheader("🔍 종목별 ETF 보유 현황")
     stock_counts = df_pdf[stock_cols].notna().sum().sort_values(ascending=False)
 
@@ -238,30 +296,127 @@ def page_pdf():
         res = df_pdf[mask][['ETF명', sel]].copy()
         res[sel] = vals[mask]
         res = res.sort_values(sel, ascending=False)
+
+        # 유니버스 정보 추가
         if not res.empty and df_uni is not None:
-            for c in ['대카테고리','중카테고리','시가총액(억원)']:
+            for c in ['대카테고리','중카테고리','시가총액(억원)',
+                       'BM_1M(%)','BM_3M(%)','BM_6M(%)','BM_1Y(%)','BM_YTD(%)']:
                 if c in df_uni.columns:
-                    res[c] = res.index.map(lambda t: df_uni.at[t,c] if t in df_uni.index else '')
+                    res[c] = res.index.map(lambda t: df_uni.at[t,c] if t in df_uni.index else np.nan)
 
         st.caption(f"'{sel}' 보유 ETF: **{len(res)}개**")
+
+        # ── [기능 5] 3분할 차트: 비중 + BM성과 ──
+        chart_data = res.head(20).copy()
+        if len(chart_data) > 0:
+            _render_stock_analysis_charts(chart_data, sel, df_uni)
+
+        # ── 결과 테이블 ──
         st.dataframe(res, use_container_width=True, height=400)
 
-        if len(res) > 0:
-            cd = res.head(20).copy(); cd['label'] = cd['ETF명'].str[:18]
-            fig = go.Figure(go.Bar(x=cd[sel], y=cd['label'], orientation='h',
-                                   marker_color='#3498db',
-                                   text=[f"{v:.1f}%" for v in cd[sel]], textposition='outside'))
-            fig.update_layout(title=f"'{sel}' 비중 Top 20", height=max(300,len(cd)*30),
-                            yaxis=dict(autorange='reversed'), margin=dict(l=0,r=50,t=40,b=0))
-            st.plotly_chart(fig, use_container_width=True)
+        # ── [기능 4] ETF 선택 → PDF 비교 ──
+        etf_options = [f"{t} | {res.at[t,'ETF명'][:30]}" for t in res.index]
+        selected = st.multiselect("🔬 PDF 구성종목 비교 (최대 3개)",
+                                  etf_options, max_selections=3, key="pdf_comp")
+        if selected:
+            sel_tickers = [s.split(' | ')[0] for s in selected]
+            render_pdf_comparison(sel_tickers, df_pdf, df_uni, key_prefix="pdf")
 
+    # ── 인기 종목 ──
     st.markdown("---")
     st.subheader("🏆 보유 ETF 수 상위 종목")
-    ts = stock_counts.head(20).reset_index(); ts.columns = ['종목명','보유 ETF 수']
+    ts = stock_counts.head(20).reset_index()
+    ts.columns = ['종목명','보유 ETF 수']
     st.dataframe(ts, use_container_width=True, hide_index=True)
 
+    # ── 전체 매트릭스 ──
     with st.expander(f"📋 전체 매트릭스 ({len(df_pdf)} × {len(stock_cols)})"):
         st.dataframe(df_pdf, use_container_width=True, height=500)
+
+
+def _render_stock_analysis_charts(chart_data, stock_name, df_uni):
+    """[기능 5] 3분할: 비중 | BM 성과 바 | BM 성과 히트맵"""
+    labels = chart_data['ETF명'].str[:15].tolist()
+    tickers = chart_data.index.tolist()
+
+    col1, col2, col3 = st.columns(3)
+
+    # ── 좌측: 종목 비중 ──
+    with col1:
+        fig1 = go.Figure(go.Bar(
+            x=chart_data[stock_name].values,
+            y=labels, orientation='h',
+            marker_color='#3498db',
+            text=[f"{v:.1f}%" for v in chart_data[stock_name].values],
+            textposition='outside'
+        ))
+        fig1.update_layout(
+            title=f"'{stock_name}' 비중(%)",
+            height=max(300, len(labels)*28),
+            yaxis=dict(autorange='reversed'),
+            margin=dict(l=0, r=40, t=40, b=0),
+            xaxis_title=""
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+
+    # ── 중간: BM 대비 성과 (그룹 바) ──
+    with col2:
+        bm_cols = ['BM_1M(%)','BM_3M(%)','BM_6M(%)','BM_1Y(%)','BM_YTD(%)']
+        bm_labels = ['1M','3M','6M','1Y','YTD']
+        available_bm = [c for c in bm_cols if c in chart_data.columns]
+
+        if available_bm:
+            # Top 10만
+            top10 = chart_data.head(10)
+            top10_labels = top10['ETF명'].str[:12].tolist()
+
+            fig2 = go.Figure()
+            colors = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#3498db']
+            for j, (bc, bl) in enumerate(zip(available_bm, bm_labels)):
+                vals = pd.to_numeric(top10[bc], errors='coerce').fillna(0).values
+                fig2.add_trace(go.Bar(
+                    name=bl, x=vals, y=top10_labels,
+                    orientation='h', marker_color=colors[j % len(colors)],
+                ))
+            fig2.update_layout(
+                title="BM 대비 성과(%)",
+                barmode='group',
+                height=max(300, len(top10)*28),
+                yaxis=dict(autorange='reversed'),
+                margin=dict(l=0, r=10, t=40, b=0),
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                xaxis_title=""
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.caption("BM 성과 데이터 없음")
+
+    # ── 우측: 히트맵 ──
+    with col3:
+        if available_bm:
+            top10 = chart_data.head(10)
+            top10_labels = top10['ETF명'].str[:12].tolist()
+            heat_data = []
+            for bc in available_bm:
+                heat_data.append(pd.to_numeric(top10[bc], errors='coerce').fillna(0).values)
+
+            heat_df = pd.DataFrame(
+                heat_data, index=bm_labels[:len(available_bm)],
+                columns=top10_labels
+            )
+            fig3 = px.imshow(heat_df, text_auto='.1f',
+                            color_continuous_scale='RdYlGn',
+                            aspect='auto',
+                            zmin=-20, zmax=20)
+            fig3.update_layout(
+                title="BM성과 히트맵(%)",
+                height=max(300, len(top10)*28),
+                margin=dict(l=0, r=0, t=40, b=0),
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+        else:
+            st.caption("BM 성과 데이터 없음")
+
 
 # ============================================================================
 # 페이지 3: 수익률 비교
@@ -275,7 +430,7 @@ def page_returns():
     gd = st.session_state.global_data
     df_uni = st.session_state.df_universe
 
-    # 기간
+    # 기간 설정
     c1, c2, c3 = st.columns([1,1,2])
     with c1: start_date = st.date_input("시작일", value=datetime.today()-timedelta(days=90))
     with c2: end_date = st.date_input("종료일", value=datetime.today())
@@ -409,7 +564,6 @@ def main():
     if st.session_state.get('show_global_toast'):
         st.toast("🎉 글로벌 가격 데이터 수집 완료!", icon="✅")
         st.session_state.show_global_toast = False
-
     if page == "유니버스 탐색": page_universe()
     elif page == "구성종목(PDF) 분석": page_pdf()
     elif page == "수익률 비교": page_returns()
