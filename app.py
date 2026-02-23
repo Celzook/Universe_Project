@@ -9,7 +9,7 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import threading, gc
+import threading, gc, traceback
 
 st.set_page_config(page_title="ETF Universe Explorer", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
@@ -19,20 +19,39 @@ from global_price_collector import (
     collect_global_prices, calc_period_return, GLOBAL_INDICES, US_ETFS
 )
 
+
 # ============================================================================
-# 캐시
+# KST 시간 헬퍼
+# ============================================================================
+def now_kst():
+    """현재 한국시간 반환"""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Seoul"))
+    except Exception:
+        return datetime.utcnow() + timedelta(hours=9)
+
+def today_kst():
+    """오늘 날짜 (KST) 반환"""
+    return now_kst().date()
+
+
+# ============================================================================
+# 캐시 — base_date도 함께 반환
 # ============================================================================
 @st.cache_data(ttl=3600*6, show_spinner=False)
 def cached_build_universe(min_cap, top_n):
     Config.MIN_MARKET_CAP_BILLIONS = min_cap
     Config.TOP_N_HOLDINGS = top_n
+    Config.BASE_DATE = None  # 매번 새로 찾도록 리셋
     df, df_close, df_pdf = build_universe()
+    base_date = Config.BASE_DATE  # build 후 설정된 값
     for c in df.select_dtypes(include='float64').columns:
         df[c] = df[c].astype('float32')
     if df_close is not None:
         df_close = df_close.astype('float32')
     gc.collect()
-    return df, df_close, df_pdf
+    return df, df_close, df_pdf, base_date  # base_date 포함
 
 @st.cache_data(ttl=3600*6, show_spinner=False)
 def cached_global_prices():
@@ -120,15 +139,18 @@ def render_sidebar():
 def run_universe_build(min_cap, top_n):
     with st.spinner("유니버스 빌드 중... (첫 실행 3~8분, 이후 캐시)"):
         try:
-            df, df_close, df_pdf = cached_build_universe(min_cap, top_n)
+            df, df_close, df_pdf, base_date = cached_build_universe(min_cap, top_n)
             st.session_state.df_universe = df
             st.session_state.df_prices_kr = df_close
             st.session_state.df_pdf = df_pdf
-            st.session_state.base_date = Config.BASE_DATE or datetime.today().strftime("%Y%m%d")
+            st.session_state.base_date = base_date or today_kst().strftime("%Y%m%d")
             st.session_state.universe_built = True
-            st.success(f"✅ {len(df)}개 ETF 유니버스 빌드 완료!")
+            st.success(f"✅ {len(df)}개 ETF 유니버스 빌드 완료! (기준일: {st.session_state.base_date})")
         except Exception as e:
+            err_detail = traceback.format_exc()
             st.error(f"빌드 실패: {e}")
+            with st.expander("🔍 상세 에러"):
+                st.code(err_detail)
             return
     start_global_collection()
 
@@ -402,12 +424,12 @@ def page_returns():
 
     # 기간 설정
     c1, c2, c3 = st.columns([1,1,2])
-    with c1: start_date = st.date_input("시작일", value=datetime.today()-timedelta(days=90))
-    with c2: end_date = st.date_input("종료일", value=datetime.today())
+    with c1: start_date = st.date_input("시작일", value=today_kst()-timedelta(days=90))
+    with c2: end_date = st.date_input("종료일", value=today_kst())
     with c3:
         q = st.radio("빠른 선택", ['직접입력','1M','3M','6M','YTD','1Y'], horizontal=True)
         if q != '직접입력':
-            end_date = datetime.today().date()
+            end_date = today_kst()
             start_date = {'1M': end_date-timedelta(30), '3M': end_date-timedelta(90),
                          '6M': end_date-timedelta(180), '1Y': end_date-timedelta(365),
                          'YTD': datetime(end_date.year,1,1).date()}[q]
