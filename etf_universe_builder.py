@@ -58,6 +58,62 @@ class Config:
 # ============================================================================
 # 유틸리티
 # ============================================================================
+def _get_etf_tickers(date_str):
+    """ETF 티커 목록 조회 — pykrx 버전 호환 래퍼
+    방법 1: get_etf_ticker_list (구 버전)
+    방법 2: get_market_ticker_list(market='ETF') (신 버전)
+    방법 3: get_etf_ohlcv_by_ticker (최후 수단)
+    """
+    # 방법 1
+    try:
+        result = stock.get_etf_ticker_list(date_str)
+        if result is not None and len(result) > 0:
+            return list(result)
+    except (KeyError, AttributeError, Exception) as e:
+        pass
+
+    # 방법 2
+    try:
+        result = stock.get_market_ticker_list(date_str, market="ETF")
+        if result is not None and len(result) > 0:
+            print(f"  → get_market_ticker_list fallback 사용")
+            return list(result)
+    except (KeyError, AttributeError, Exception):
+        pass
+
+    # 방법 3: ETF 전체 시세에서 티커 추출
+    try:
+        df_all = stock.get_etf_ohlcv_by_ticker(date_str)
+        if df_all is not None and not df_all.empty:
+            print(f"  → get_etf_ohlcv_by_ticker fallback 사용")
+            return list(df_all.index)
+    except (KeyError, AttributeError, Exception):
+        pass
+
+    return []
+
+
+def _get_etf_name(ticker):
+    """ETF 이름 조회 — pykrx 버전 호환 래퍼"""
+    # 방법 1: ETF 전용
+    try:
+        name = stock.get_etf_ticker_name(ticker)
+        if name:
+            return name
+    except (KeyError, AttributeError, Exception):
+        pass
+
+    # 방법 2: 일반 주식 이름 (ETF도 조회 가능)
+    try:
+        name = stock.get_market_ticker_name(ticker)
+        if name:
+            return name
+    except (KeyError, AttributeError, Exception):
+        pass
+
+    return "N/A"
+
+
 def find_latest_business_date(max_lookback=30):
     """최근 영업일 찾기
     - KST(한국시간) 기준으로 계산 (Streamlit Cloud는 UTC)
@@ -90,7 +146,7 @@ def find_latest_business_date(max_lookback=30):
 
         ds = d.strftime("%Y%m%d")
         try:
-            tickers = stock.get_etf_ticker_list(ds)
+            tickers = _get_etf_tickers(ds)
             if tickers is not None and len(tickers) > 0:
                 print(f"  ✅ 최근 영업일: {ds}")
                 return ds
@@ -144,7 +200,7 @@ def step1_get_tickers_and_names(base_date):
     print("="*60)
 
     with _timer("Step 1"):
-        tickers = stock.get_etf_ticker_list(base_date)
+        tickers = _get_etf_tickers(base_date)
         print(f"  → 전체 ETF: {len(tickers)}개")
 
         # 캐시 확인
@@ -157,7 +213,7 @@ def step1_get_tickers_and_names(base_date):
             # 멀티스레드로 이름 수집
             etf_names = {}
             def fetch_name(t):
-                try: return t, stock.get_etf_ticker_name(t)
+                try: return t, _get_etf_name(t)
                 except Exception: return t, "N/A"
 
             with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
@@ -674,10 +730,7 @@ def _pykrx_holdings(tickers, base_date):
                 return ticker, []
 
             # ETF 티커 목록 (ETF-in-ETF 제외용)
-            try:
-                etf_tickers_set = set(stock.get_etf_ticker_list(base_date))
-            except Exception:
-                etf_tickers_set = set()
+            etf_tickers_set = set(_get_etf_tickers(base_date))
 
             items = []
             pdf_sorted = pdf.sort_values(weight_col, ascending=False)
