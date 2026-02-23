@@ -1,0 +1,9 @@
+setuptools>=69.0
+pykrx
+pandas>=1.5
+numpy
+openpyxl
+tqdm
+yfinance
+streamlit
+plotly
