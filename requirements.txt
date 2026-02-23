@@ -1,5 +1,5 @@
-setuptools
-pykrx==1.0.45
+setuptools>=69.0    ← 맨 위에 추가
+pykrx               ← 버전 고정 제거 (어떤 Python에서든 호환)
 pandas>=1.5,<3.0
 numpy
 openpyxl
