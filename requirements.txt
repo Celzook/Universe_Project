@@ -1,3 +1,4 @@
+setuptools
 pykrx==1.0.45
 pandas>=1.5,<3.0
 numpy
