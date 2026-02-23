@@ -6,7 +6,7 @@
   Step 1: 전체 ETF 티커 + 이름 수집 (가벼움)
   Step 2: 유형 필터링 — 키워드 기반 (가벼움)
   Step 3: 시가총액 데이터 수집 → 100억 미만 제외 (중간)
-  Step 4: 최종 리스트에 대해 가격/상장일/PDF 수집 (무거움) 
+  Step 4: 최종 리스트에 대해 가격/상장일/PDF 수집 (무거움)
   Step 5: 수익률/BM/순위 계산 + 엑셀 저장
 
  pip install pykrx pandas openpyxl tqdm
