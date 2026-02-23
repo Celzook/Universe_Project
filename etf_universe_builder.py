@@ -203,6 +203,13 @@ def step1_get_tickers_and_names(base_date):
         tickers = _get_etf_tickers(base_date)
         print(f"  → 전체 ETF: {len(tickers)}개")
 
+        if len(tickers) == 0:
+            print("  ⚠️ ETF 티커를 하나도 가져오지 못했습니다!")
+            print("  → 빈 DataFrame 반환")
+            df = pd.DataFrame(columns=['ETF명'])
+            df.index.name = '티커'
+            return df
+
         # 캐시 확인
         cache_name = f"names_{base_date}.pkl"
         cached = _load_cache(cache_name)
@@ -229,6 +236,10 @@ def step1_get_tickers_and_names(base_date):
         df = pd.DataFrame({'티커': tickers,
                             'ETF명': [etf_names.get(t, 'N/A') for t in tickers]})
         df = df.set_index('티커')
+
+        # 검증
+        print(f"  → DataFrame: {df.shape}, 컬럼: {df.columns.tolist()}")
+        assert 'ETF명' in df.columns, f"ETF명 컬럼 없음! 컬럼: {df.columns.tolist()}"
         print(f"  ✅ {len(df)}개 ETF 이름 수집 완료")
     return df
 
@@ -243,6 +254,22 @@ def step2_type_filter_and_classify(df):
 
     t0 = time.time()
     before = len(df)
+
+    # 검증
+    print(f"  → 입력 DataFrame: {df.shape}, 컬럼: {df.columns.tolist()}")
+    if 'ETF명' not in df.columns:
+        print("  ⚠️ ETF명 컬럼이 없습니다! 스킵합니다.")
+        df['대카테고리'] = '기타'
+        df['중카테고리'] = '기타'
+        df['소카테고리'] = ''
+        return df
+
+    if len(df) == 0:
+        print("  ⚠️ ETF가 0개입니다!")
+        df['대카테고리'] = pd.Series(dtype=str)
+        df['중카테고리'] = pd.Series(dtype=str)
+        df['소카테고리'] = pd.Series(dtype=str)
+        return df
 
     def should_exclude(name):
         if pd.isna(name): return True
@@ -264,8 +291,16 @@ def step2_type_filter_and_classify(df):
         if len(excluded) > 10:
             print(f"    ... 외 {len(excluded)-10}개")
 
+    # 필터 후 검증
+    print(f"  → 필터 후: {df.shape}, 컬럼: {df.columns.tolist()}")
+
     # 카테고리 분류
-    df = _classify(df)
+    if len(df) > 0 and 'ETF명' in df.columns:
+        df = _classify(df)
+    else:
+        df['대카테고리'] = '기타'
+        df['중카테고리'] = '기타'
+        df['소카테고리'] = ''
 
     print(f"\n  → {before}개 → {len(df)}개")
     print(f"  ⏱️ Step 2: {time.time()-t0:.1f}초")
