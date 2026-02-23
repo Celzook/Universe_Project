@@ -58,18 +58,54 @@ class Config:
 # ============================================================================
 # 유틸리티
 # ============================================================================
-def find_latest_business_date(max_lookback=10):
-    today = datetime.today()
-    for i in range(max_lookback):
-        d = today - timedelta(days=i)
+def find_latest_business_date(max_lookback=30):
+    """최근 영업일 찾기
+    - KST(한국시간) 기준으로 계산 (Streamlit Cloud는 UTC)
+    - 주말 자동 건너뛰기
+    - 장 마감 전이면 전 영업일 사용
+    - 공휴일 대비 최대 30일 뒤로
+    """
+    # UTC → KST (UTC+9)
+    try:
+        from zoneinfo import ZoneInfo
+        now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    except Exception:
+        # Python 3.8 이하 또는 zoneinfo 없는 환경
+        now_kst = datetime.utcnow() + timedelta(hours=9)
+
+    today_kst = now_kst.date()
+    hour_kst = now_kst.hour
+
+    print(f"  🕐 현재 KST: {now_kst.strftime('%Y-%m-%d %H:%M')}")
+
+    # 장 마감(15:30) 전이면 오늘 데이터 없을 수 있음 → 전일부터 탐색
+    start_offset = 0 if hour_kst >= 18 else 1  # 18시 이후면 당일 데이터 확보
+
+    for i in range(start_offset, max_lookback):
+        d = today_kst - timedelta(days=i)
+
+        # 주말 건너뛰기 (토=5, 일=6)
+        if d.weekday() >= 5:
+            continue
+
         ds = d.strftime("%Y%m%d")
         try:
-            if len(stock.get_etf_ticker_list(ds)) > 0:
+            tickers = stock.get_etf_ticker_list(ds)
+            if tickers is not None and len(tickers) > 0:
                 print(f"  ✅ 최근 영업일: {ds}")
                 return ds
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠️ {ds} 조회 실패: {e}")
+            time.sleep(0.5)  # API 부하 방지
             continue
-    raise ValueError("최근 영업일을 찾을 수 없습니다.")
+
+    # 최후 수단: 주말 무시하고 단순 뒤로
+    fallback = today_kst - timedelta(days=3)
+    while fallback.weekday() >= 5:
+        fallback -= timedelta(days=1)
+    ds = fallback.strftime("%Y%m%d")
+    print(f"  ⚠️ fallback 영업일: {ds}")
+    return ds
 
 
 def _timer(label):
