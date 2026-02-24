@@ -482,7 +482,18 @@ def _collect_prices(df, tickers, base_date):
     print("  → KOSPI 수집...")
     try:
         kdf = stock.get_index_ohlcv_by_date(start_date, base_date, "1001")
-        kospi = kdf['종가'] if '종가' in kdf.columns else kdf.iloc[:, 3]
+        print(f"  → KOSPI 컬럼: {kdf.columns.tolist()}")
+        # 종가 컬럼 찾기
+        kospi = pd.Series(dtype=float)
+        for col_name in ['종가', '현재가', 'Close']:
+            if col_name in kdf.columns:
+                kospi = kdf[col_name]; break
+        if kospi.empty and not kdf.empty:
+            num_cols = kdf.select_dtypes(include=[np.number]).columns
+            if len(num_cols) >= 4:
+                kospi = kdf[num_cols[3]]
+            elif len(num_cols) > 0:
+                kospi = kdf[num_cols[-1]]
         kospi = kospi.sort_index()
         print(f"  → KOSPI: {len(kospi)}일")
     except Exception as e:
@@ -524,8 +535,13 @@ def _collect_prices(df, tickers, base_date):
 def _fetch_prices_bulk(tickers, start_date, base_date):
     try:
         sample = stock.get_etf_ohlcv_by_date(start_date, base_date, "069500")
+        if sample.empty:
+            return pd.DataFrame()
+        print(f"  → 069500 샘플 컬럼: {sample.columns.tolist()}")
         dates = [d.strftime("%Y%m%d") for d in sample.index]
-    except Exception: return pd.DataFrame()
+    except Exception as e:
+        print(f"  ⚠️ 영업일 추출 실패: {e}")
+        return pd.DataFrame()
 
     print(f"  → 영업일: {len(dates)}일 / 스레드: {Config.MAX_WORKERS}")
 
@@ -533,9 +549,17 @@ def _fetch_prices_bulk(tickers, start_date, base_date):
         try:
             r = stock.get_etf_price_by_ticker(d)
             time.sleep(Config.API_DELAY)
-            if not r.empty and '종가' in r.columns: return d, r['종가']
-            elif not r.empty: return d, r.iloc[:, 0]
-        except Exception: pass
+            if r is not None and not r.empty:
+                # 종가 컬럼 찾기 (다양한 이름 대응)
+                for col_name in ['종가', '현재가', 'Close']:
+                    if col_name in r.columns:
+                        return d, r[col_name]
+                # 못 찾으면 숫자 컬럼 중 첫번째
+                num_cols = r.select_dtypes(include=[np.number]).columns
+                if len(num_cols) > 0:
+                    return d, r[num_cols[0]]
+        except Exception:
+            pass
         return d, None
 
     daily = {}
@@ -547,7 +571,7 @@ def _fetch_prices_bulk(tickers, start_date, base_date):
                 d, p = f.result()
                 if p is not None: daily[d] = p
                 pbar.update(1)
-    print(f"  ⏱️ {time.time()-t0:.1f}초")
+    print(f"  ⏱️ {time.time()-t0:.1f}초 ({len(daily)}/{len(dates)}일 성공)")
     if not daily: return pd.DataFrame()
 
     out = pd.DataFrame(daily).T
@@ -562,9 +586,18 @@ def _fetch_prices_by_ticker(tickers, start_date, base_date):
         try:
             o = stock.get_etf_ohlcv_by_date(start_date, base_date, t)
             time.sleep(Config.API_DELAY)
-            if not o.empty and '종가' in o.columns: return t, o['종가']
-            elif not o.empty: return t, o.iloc[:, 3]
-        except Exception: pass
+            if o is not None and not o.empty:
+                # 종가 컬럼 찾기
+                for col_name in ['종가', '현재가', 'Close']:
+                    if col_name in o.columns:
+                        return t, o[col_name]
+                num_cols = o.select_dtypes(include=[np.number]).columns
+                if len(num_cols) >= 4:
+                    return t, o[num_cols[3]]  # 보통 시/고/저/종 순
+                elif len(num_cols) > 0:
+                    return t, o[num_cols[-1]]
+        except Exception:
+            pass
         return t, None
 
     d = {}
@@ -575,6 +608,7 @@ def _fetch_prices_by_ticker(tickers, start_date, base_date):
                 t, s = f.result()
                 if s is not None: d[t] = s
                 pbar.update(1)
+    print(f"  → 티커별 수집: {len(d)}/{len(tickers)}개 성공")
     if not d: return pd.DataFrame()
     return pd.DataFrame(d).sort_index().apply(pd.to_numeric, errors='coerce')
 
