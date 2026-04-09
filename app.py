@@ -14,7 +14,7 @@ import gc, traceback
 st.set_page_config(page_title="ETF Universe Explorer", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
 
-from etf_universe_builder import build_universe, Config
+from etf_universe_builder import build_universe, Config, diagnose
 from global_price_collector import (
     collect_global_prices, calc_period_return, GLOBAL_INDICES, US_ETFS
 )
@@ -131,7 +131,15 @@ def render_sidebar():
     elif st.session_state.global_loading:
         st.sidebar.info("⏳ 수집 중...")
     else:
-        st.sidebar.caption("유니버스 빌드 후 자동 시작")
+        if st.session_state.universe_built:
+            if st.sidebar.button("🌍 글로벌 수집 재시도", use_container_width=True):
+                start_global_collection()
+        else:
+            st.sidebar.caption("유니버스 빌드 후 자동 시작")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔧 진단")
+    if st.sidebar.button("🩺 KRX 연결 진단", use_container_width=True):
+        run_diagnosis()
     st.sidebar.markdown("---")
     return st.sidebar.radio("📌 메뉴", ["유니버스 탐색", "구성종목(PDF) 분석", "수익률 비교"],
                             label_visibility="collapsed")
@@ -169,6 +177,44 @@ def start_global_collection():
         st.warning(f"글로벌 가격 수집 실패: {e}")
     finally:
         st.session_state.global_loading = False
+
+
+def run_diagnosis():
+    """KRX API 연결 상태 진단 — 사이드바에서 호출"""
+    st.subheader("🩺 KRX 연결 진단")
+    with st.spinner("진단 중... (약 10~30초)"):
+        try:
+            results = diagnose()
+        except Exception as e:
+            st.error(f"진단 실패: {e}")
+            return
+
+    checks = [
+        ('base_date_ok',  '영업일 탐색'),
+        ('tickers_ok',    'ETF 티커 목록'),
+        ('name_ok',       'ETF 이름 조회'),
+        ('mktcap_ok',     '시가총액 데이터 (전종목시세_ETF)'),
+        ('ohlcv_ok',      'OHLCV 데이터 (get_etf_ohlcv_by_ticker)'),
+        ('ohlcv_date_ok', '개별 가격 (get_etf_ohlcv_by_date)'),
+    ]
+    for key, label in checks:
+        ok = results.get(key, False)
+        if ok:
+            st.success(f"✅ {label}")
+        else:
+            err = results.get(key.replace('_ok','_error'), '상세 정보 없음')
+            st.error(f"❌ {label}: {err}")
+
+    # 상세 정보
+    with st.expander("📋 진단 상세"):
+        st.json({k: str(v) for k, v in results.items()})
+
+    if results.get('all_ok'):
+        st.balloons()
+        st.success("모든 항목 정상! 유니버스 빌드를 진행하세요.")
+    else:
+        st.warning("일부 항목이 실패했습니다. 위 결과를 확인하세요. "
+                   "KRX 서버 점검 시간(월~토 06:00~08:00) 또는 공휴일에는 실패할 수 있습니다.")
 
 
 # ============================================================================
@@ -642,7 +688,7 @@ def _draw_return_bar(df_prices, start_date, end_date, title, name_map=None):
         labels = [f"{t} ({name_map.get(t,t)})" for t in ret.index]
     else:
         labels = ret.index.tolist()
-    rd = ret.copy(); rd.index = labels; rs = rd.sort_values(ascending=False)
+    rd = ret.copy(); rd.index = labels; rs = rd.sort_values(ascending=True)
     colors = ['#2ecc71' if v>=0 else '#e74c3c' for v in rs.values]
     fig = go.Figure(go.Bar(x=rs.values, y=rs.index, orientation='h', marker_color=colors,
                            text=[f"{v:+.2f}%" for v in rs.values], textposition='outside'))
