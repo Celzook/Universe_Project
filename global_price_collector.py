@@ -18,64 +18,97 @@ import os, pickle
 # 미국 상장 ETF 유니버스 (지수 대용 포함)
 # ============================================================================
 GLOBAL_INDICES = {
-    # 지수 대용 ETF (미국 상장)
-    'KOSPI':     {'ticker': 'EWY',       'name': 'iShares MSCI Korea',     'country': '한국'},
-    'S&P500':    {'ticker': 'SPY',       'name': 'SPDR S&P 500',          'country': '미국'},
-    'NASDAQ':    {'ticker': 'QQQ',       'name': 'Invesco NASDAQ 100',    'country': '미국'},
-    'Dow Jones': {'ticker': 'DIA',       'name': 'SPDR Dow Jones',        'country': '미국'},
-    'Nikkei':    {'ticker': 'EWJ',       'name': 'iShares MSCI Japan',    'country': '일본'},
-    'China':     {'ticker': 'FXI',       'name': 'iShares China LC',      'country': '중국'},
-    'Europe':    {'ticker': 'VGK',       'name': 'Vanguard FTSE Europe',  'country': '유럽'},
-    'India':     {'ticker': 'INDA',      'name': 'iShares MSCI India',    'country': '인도'},
-    'EM':        {'ticker': 'EEM',       'name': 'iShares MSCI EM',       'country': '신흥국'},
+    # 지수 대용 ETF (미국 상장) — 18개
+    'KOSPI':      {'ticker': 'EWY',   'name': 'iShares MSCI Korea',       'country': '한국'},
+    'S&P500':     {'ticker': 'SPY',   'name': 'SPDR S&P 500',            'country': '미국'},
+    'NASDAQ':     {'ticker': 'QQQ',   'name': 'Invesco NASDAQ 100',      'country': '미국'},
+    'Dow Jones':  {'ticker': 'DIA',   'name': 'SPDR Dow Jones',          'country': '미국'},
+    'Russell2000':{'ticker': 'IWM',   'name': 'iShares Russell 2000',    'country': '미국'},
+    'Nikkei':     {'ticker': 'EWJ',   'name': 'iShares MSCI Japan',      'country': '일본'},
+    'China':      {'ticker': 'FXI',   'name': 'iShares China LC',        'country': '중국'},
+    'HongKong':   {'ticker': 'EWH',   'name': 'iShares MSCI Hong Kong',  'country': '홍콩'},
+    'Taiwan':     {'ticker': 'EWT',   'name': 'iShares MSCI Taiwan',     'country': '대만'},
+    'India':      {'ticker': 'INDA',  'name': 'iShares MSCI India',      'country': '인도'},
+    'Vietnam':    {'ticker': 'VNM',   'name': 'VanEck Vietnam',          'country': '베트남'},
+    'Europe':     {'ticker': 'VGK',   'name': 'Vanguard FTSE Europe',    'country': '유럽'},
+    'Germany':    {'ticker': 'EWG',   'name': 'iShares MSCI Germany',    'country': '독일'},
+    'UK':         {'ticker': 'EWU',   'name': 'iShares MSCI UK',         'country': '영국'},
+    'Brazil':     {'ticker': 'EWZ',   'name': 'iShares MSCI Brazil',     'country': '브라질'},
+    'Australia':  {'ticker': 'EWA',   'name': 'iShares MSCI Australia',  'country': '호주'},
+    'EM':         {'ticker': 'EEM',   'name': 'iShares MSCI EM',         'country': '신흥국'},
+    'ACWI':       {'ticker': 'ACWI',  'name': 'iShares MSCI ACWI',       'country': '글로벌'},
 }
 
 US_ETFS = {
-    # 시장
-    'SPY':  {'name': 'SPDR S&P 500',         'category': '시장'},
-    'QQQ':  {'name': 'Invesco NASDAQ 100',    'category': '시장'},
-    'DIA':  {'name': 'SPDR Dow Jones',        'category': '시장'},
-    'IWM':  {'name': 'iShares Russell 2000',  'category': '시장'},
-    'VTI':  {'name': 'Vanguard Total Market', 'category': '시장'},
+    # ── 시장 (5) ──
+    'SPY':  {'name': 'SPDR S&P 500',            'category': '시장'},
+    'QQQ':  {'name': 'Invesco NASDAQ 100',       'category': '시장'},
+    'DIA':  {'name': 'SPDR Dow Jones',           'category': '시장'},
+    'IWM':  {'name': 'iShares Russell 2000',     'category': '시장'},
+    'VTI':  {'name': 'Vanguard Total Market',    'category': '시장'},
 
-    # 섹터
-    'XLK':  {'name': 'Technology Select',     'category': '섹터'},
-    'XLF':  {'name': 'Financial Select',      'category': '섹터'},
-    'XLE':  {'name': 'Energy Select',         'category': '섹터'},
-    'XLV':  {'name': 'Health Care Select',    'category': '섹터'},
-    'XLI':  {'name': 'Industrial Select',     'category': '섹터'},
-    'XLP':  {'name': 'Consumer Staples',      'category': '섹터'},
-    'XLY':  {'name': 'Consumer Disc.',        'category': '섹터'},
-    'XLU':  {'name': 'Utilities Select',      'category': '섹터'},
+    # ── 섹터 (11) ──
+    'XLK':  {'name': 'Technology Select',        'category': '섹터'},
+    'XLF':  {'name': 'Financial Select',         'category': '섹터'},
+    'XLE':  {'name': 'Energy Select',            'category': '섹터'},
+    'XLV':  {'name': 'Health Care Select',       'category': '섹터'},
+    'XLI':  {'name': 'Industrial Select',        'category': '섹터'},
+    'XLP':  {'name': 'Consumer Staples',         'category': '섹터'},
+    'XLY':  {'name': 'Consumer Disc.',           'category': '섹터'},
+    'XLU':  {'name': 'Utilities Select',         'category': '섹터'},
+    'XLC':  {'name': 'Communication Svc.',       'category': '섹터'},
+    'XLB':  {'name': 'Materials Select',         'category': '섹터'},
+    'XLRE': {'name': 'Real Estate Select',       'category': '섹터'},
 
-    # 테마
-    'SOXX': {'name': 'iShares Semiconductor', 'category': '테마'},
-    'ARKK': {'name': 'ARK Innovation',        'category': '테마'},
-    'TAN':  {'name': 'Invesco Solar',         'category': '테마'},
-    'LIT':  {'name': 'Global X Lithium',      'category': '테마'},
+    # ── 테마 (10) ──
+    'SOXX': {'name': 'iShares Semiconductor',    'category': '테마'},
+    'ARKK': {'name': 'ARK Innovation',           'category': '테마'},
+    'TAN':  {'name': 'Invesco Solar',            'category': '테마'},
+    'LIT':  {'name': 'Global X Lithium',         'category': '테마'},
+    'BOTZ': {'name': 'Global X Robotics & AI',   'category': '테마'},
+    'HACK': {'name': 'ETFMG Cybersecurity',      'category': '테마'},
+    'URA':  {'name': 'Global X Uranium',         'category': '테마'},
+    'KWEB': {'name': 'KraneShares China Internet','category': '테마'},
+    'XBI':  {'name': 'SPDR S&P Biotech',         'category': '테마'},
+    'ITA':  {'name': 'iShares US Aerospace',     'category': '테마'},
 
-    # 채권
-    'TLT':  {'name': 'iShares 20+ Treasury',  'category': '채권'},
-    'HYG':  {'name': 'iShares High Yield',    'category': '채권'},
-    'LQD':  {'name': 'iShares IG Corp',       'category': '채권'},
+    # ── 채권 (6) ──
+    'TLT':  {'name': 'iShares 20+ Treasury',     'category': '채권'},
+    'IEF':  {'name': 'iShares 7-10Y Treasury',   'category': '채권'},
+    'SHY':  {'name': 'iShares 1-3Y Treasury',    'category': '채권'},
+    'HYG':  {'name': 'iShares High Yield',       'category': '채권'},
+    'LQD':  {'name': 'iShares IG Corp',          'category': '채권'},
+    'TIP':  {'name': 'iShares TIPS',             'category': '채권'},
 
-    # 원자재
-    'GLD':  {'name': 'SPDR Gold',             'category': '원자재'},
-    'SLV':  {'name': 'iShares Silver',        'category': '원자재'},
-    'USO':  {'name': 'United States Oil',     'category': '원자재'},
+    # ── 원자재 (5) ──
+    'GLD':  {'name': 'SPDR Gold',                'category': '원자재'},
+    'SLV':  {'name': 'iShares Silver',           'category': '원자재'},
+    'USO':  {'name': 'United States Oil',        'category': '원자재'},
+    'DBA':  {'name': 'Invesco DB Agriculture',   'category': '원자재'},
+    'PPLT': {'name': 'abrdn Platinum',           'category': '원자재'},
 
-    # 국가
-    'EWY':  {'name': 'iShares MSCI Korea',    'category': '국가'},
-    'EWJ':  {'name': 'iShares MSCI Japan',    'category': '국가'},
-    'FXI':  {'name': 'iShares China LC',      'category': '국가'},
-    'INDA': {'name': 'iShares MSCI India',    'category': '국가'},
-    'VGK':  {'name': 'Vanguard FTSE Europe',  'category': '국가'},
-    'EEM':  {'name': 'iShares MSCI EM',       'category': '국가'},
-    'EFA':  {'name': 'iShares MSCI EAFE',     'category': '국가'},
-    'VWO':  {'name': 'Vanguard FTSE EM',      'category': '국가'},
+    # ── 국가 (11) ──
+    'EWY':  {'name': 'iShares MSCI Korea',       'category': '국가'},
+    'EWJ':  {'name': 'iShares MSCI Japan',       'category': '국가'},
+    'FXI':  {'name': 'iShares China LC',         'category': '국가'},
+    'INDA': {'name': 'iShares MSCI India',       'category': '국가'},
+    'VGK':  {'name': 'Vanguard FTSE Europe',     'category': '국가'},
+    'EEM':  {'name': 'iShares MSCI EM',          'category': '국가'},
+    'EFA':  {'name': 'iShares MSCI EAFE',        'category': '국가'},
+    'VWO':  {'name': 'Vanguard FTSE EM',         'category': '국가'},
+    'EWT':  {'name': 'iShares MSCI Taiwan',      'category': '국가'},
+    'EWZ':  {'name': 'iShares MSCI Brazil',      'category': '국가'},
+    'VNM':  {'name': 'VanEck Vietnam',           'category': '국가'},
 
-    # 리츠
-    'VNQ':  {'name': 'Vanguard Real Estate',  'category': '리츠'},
+    # ── 배당/인컴 (4) ──
+    'VYM':  {'name': 'Vanguard High Dividend',   'category': '배당'},
+    'SCHD': {'name': 'Schwab US Dividend',       'category': '배당'},
+    'DVY':  {'name': 'iShares Select Dividend',  'category': '배당'},
+    'JEPI': {'name': 'JPMorgan Equity Premium',  'category': '배당'},
+
+    # ── 리츠 (2) ──
+    'VNQ':  {'name': 'Vanguard Real Estate',     'category': '리츠'},
+    'VNQI': {'name': 'Vanguard Intl Real Estate', 'category': '리츠'},
 }
 
 
