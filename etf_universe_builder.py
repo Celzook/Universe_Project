@@ -1,21 +1,28 @@
 """
 ==============================================================================
- 한국 상장 ETF Managed Portfolio 유니버스 빌더 v5.2
+ 한국 상장 ETF Managed Portfolio 유니버스 빌더 v6.0
 ==============================================================================
- [새로운 워크플로우 — 가벼운 필터 먼저, 무거운 수집은 나중에]
-  Step 1: 전체 ETF 티커 + 이름 수집 (가벼움)
-  Step 2: 유형 필터링 — 키워드 기반 (가벼움)
-  Step 3: 시가총액 데이터 수집 → 100억 미만 제외 (중간)
-  Step 4: 최종 리스트에 대해 가격/상장일/PDF 수집 (무거움)
+ [pykrx 완전 제거 → 네이버 금융 + KRX 직접 HTTP]
+
+ 데이터 소스:
+  - 네이버 금융 API: ETF 전종목 리스트 (티커/이름/시총/NAV/종가/거래량)
+  - 네이버 차트 API: 일별 OHLCV, KOSPI 지수
+  - 네이버 금융 웹: 설정일(상장일)
+  - KRX 직접 HTTP: 구성종목(PDF)
+
+ 워크플로우:
+  Step 1: 네이버 금융 → 전체 ETF 티커 + 이름 + 시총 + NAV + 종가 + 거래량
+  Step 2: 유형 필터링 — 키워드 기반
+  Step 3: 시가총액 필터 (Step 1에서 이미 수집)
+  Step 4: 가격/상장일/PDF 수집
   Step 5: 수익률/BM/순위 계산 + 엑셀 저장
 
- pip install pykrx pandas openpyxl tqdm
+ pip install pandas openpyxl tqdm requests
 ==============================================================================
 """
 
 import pandas as pd
 import numpy as np
-from pykrx import stock
 from datetime import datetime, timedelta
 from tqdm import tqdm
 import time, warnings, os, re, pickle, json
@@ -24,6 +31,13 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 warnings.filterwarnings("ignore")
+
+# requests 라이브러리 (없으면 urllib fallback)
+try:
+    import requests as _requests_lib
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 
 # ============================================================================
@@ -56,77 +70,330 @@ class Config:
 
 
 # ============================================================================
+# 네이버 금융 / KRX 직접 HTTP 래퍼
+# ============================================================================
+_NAVER_ETF_CACHE = {}   # 메모리 캐시: {date_key: DataFrame}
+
+
+def _http_get(url, headers=None, timeout=10, encoding='utf-8'):
+    """범용 HTTP GET — requests 우선, urllib fallback"""
+    hdr = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                          'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
+    if headers:
+        hdr.update(headers)
+    if HAS_REQUESTS:
+        resp = _requests_lib.get(url, headers=hdr, timeout=timeout)
+        resp.raise_for_status()
+        if encoding:
+            resp.encoding = encoding
+        return resp.text
+    else:
+        req = Request(url, headers=hdr)
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return raw.decode(encoding, errors='ignore')
+
+
+def _http_post(url, data, headers=None, timeout=10):
+    """범용 HTTP POST — requests 우선, urllib fallback"""
+    hdr = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                          'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+           'Content-Type': 'application/x-www-form-urlencoded',
+           'Referer': 'http://data.krx.co.kr/contents/MDC/MDI/mdiStat/standard/MDCSTAT05901.cmd'}
+    if headers:
+        hdr.update(headers)
+    if HAS_REQUESTS:
+        resp = _requests_lib.post(url, data=data, headers=hdr, timeout=timeout)
+        resp.raise_for_status()
+        return resp.text
+    else:
+        from urllib.parse import urlencode
+        body = urlencode(data).encode('utf-8')
+        req = Request(url, data=body, headers=hdr)
+        with urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode('utf-8', errors='ignore')
+
+
+# ──────────────────────────────────────────────────────────
+# 네이버 금융: ETF 전종목 리스트
+# ──────────────────────────────────────────────────────────
+def naver_get_all_etfs():
+    """네이버 금융 ETF 전종목 조회 → DataFrame
+    index: 티커(6자리)
+    columns: ETF명, 시가총액(억원), NAV(억원), 종가, 거래량
+    """
+    global _NAVER_ETF_CACHE
+    cache_key = datetime.now().strftime("%Y%m%d")
+    if cache_key in _NAVER_ETF_CACHE:
+        return _NAVER_ETF_CACHE[cache_key].copy()
+
+    all_items = []
+    page = 1
+    max_pages = 50
+
+    while page <= max_pages:
+        url = (f"https://finance.naver.com/api/sise/etfItemList.nhn"
+               f"?etfType=0&targetColumn=market_sum&sortOrder=desc&page={page}")
+        try:
+            text = _http_get(url)
+            data = json.loads(text)
+            items = data.get('result', {}).get('etfItemList', [])
+            if not items:
+                break
+            all_items.extend(items)
+
+            total_cnt = data.get('result', {}).get('totalCount', 0)
+            if isinstance(total_cnt, str):
+                total_cnt = int(total_cnt.replace(',', ''))
+            if total_cnt > 0 and len(all_items) >= total_cnt:
+                break
+            page += 1
+            time.sleep(0.05)
+        except Exception as e:
+            print(f"    ⚠️ 네이버 ETF 리스트 page {page} 실패: {e}")
+            break
+
+    if not all_items:
+        print("  ⚠️ 네이버 ETF 리스트 비어있음!")
+        return pd.DataFrame(columns=['ETF명', '시가총액(억원)', 'NAV(억원)', '종가', '거래량'])
+
+    rows = []
+    for item in all_items:
+        ticker = str(item.get('itemcode', '')).strip()
+        if not ticker or len(ticker) != 6:
+            continue
+        name = str(item.get('itemname', 'N/A')).strip()
+
+        # 시가총액 (네이버 API는 '억원' 단위)
+        raw_cap = item.get('marketSum', 0)
+        try:
+            cap = float(str(raw_cap).replace(',', ''))
+        except (ValueError, TypeError):
+            cap = 0
+
+        # NAV
+        raw_nav = item.get('nav', 0)
+        try:
+            nav = float(str(raw_nav).replace(',', ''))
+        except (ValueError, TypeError):
+            nav = 0
+
+        # 종가
+        raw_price = item.get('nowVal', 0)
+        try:
+            close_price = float(str(raw_price).replace(',', ''))
+        except (ValueError, TypeError):
+            close_price = 0
+
+        # 거래량
+        raw_vol = item.get('quant', 0)
+        try:
+            volume = int(float(str(raw_vol).replace(',', '')))
+        except (ValueError, TypeError):
+            volume = 0
+
+        rows.append({
+            '티커': ticker,
+            'ETF명': name,
+            '시가총액(억원)': cap,
+            'NAV(억원)': nav,
+            '종가': close_price,
+            '거래량': volume,
+        })
+
+    df = pd.DataFrame(rows).set_index('티커')
+
+    # 시가총액 단위 자동 보정 (혹시 '원' 단위면 → 억원 변환)
+    if not df.empty and df['시가총액(억원)'].median() > 1e6:
+        df['시가총액(억원)'] = (df['시가총액(억원)'] / 1e8).round(0)
+        df['NAV(억원)'] = (df['NAV(억원)'] / 1e8).round(2)
+
+    _NAVER_ETF_CACHE[cache_key] = df.copy()
+    return df
+
+
+# ──────────────────────────────────────────────────────────
+# 네이버 차트 API: 일별 종가
+# ──────────────────────────────────────────────────────────
+def naver_get_price_history(ticker, start_date, end_date):
+    """네이버 차트 API → 일별 종가 Series
+    start_date, end_date: 'YYYYMMDD'
+    """
+    url = (f"https://fchart.stock.naver.com/siseJson.naver"
+           f"?symbol={ticker}&requestType=1"
+           f"&startTime={start_date}&endTime={end_date}&timeframe=day")
+    try:
+        text = _http_get(url)
+        return _parse_naver_chart(text)
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def naver_get_index_history(symbol, start_date, end_date):
+    """네이버 차트 API → 지수 일별 종가 Series (KOSPI, KOSDAQ 등)"""
+    url = (f"https://fchart.stock.naver.com/siseJson.naver"
+           f"?symbol={symbol}&requestType=2"
+           f"&startTime={start_date}&endTime={end_date}&timeframe=day")
+    try:
+        text = _http_get(url)
+        return _parse_naver_chart(text)
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _parse_naver_chart(text):
+    """네이버 차트 API 응답 파싱 → 종가 Series"""
+    text = text.strip().replace("'", '"')
+    rows = []
+
+    # 줄 단위 파싱
+    for line in text.split('\n'):
+        line = line.strip().rstrip(',')
+        if not line or line in ['[', ']']:
+            continue
+        # 헤더 행 스킵
+        if '날짜' in line or 'date' in line.lower():
+            continue
+        try:
+            row = json.loads(line)
+            if isinstance(row, list) and len(row) >= 5:
+                date_str = str(row[0]).strip().strip('"')
+                if date_str.isdigit() and len(date_str) == 8:
+                    rows.append({
+                        'date': pd.Timestamp(date_str),
+                        'close': float(row[4])
+                    })
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # 전체 JSON 배열 파싱 시도
+    if not rows:
+        try:
+            data = json.loads(text)
+            for row in data:
+                if isinstance(row, list) and len(row) >= 5:
+                    date_str = str(row[0]).strip().strip('"')
+                    if date_str.isdigit() and len(date_str) == 8:
+                        rows.append({
+                            'date': pd.Timestamp(date_str),
+                            'close': float(row[4])
+                        })
+        except Exception:
+            pass
+
+    if not rows:
+        return pd.Series(dtype=float)
+
+    df = pd.DataFrame(rows).set_index('date').sort_index()
+    return df['close']
+
+
+# ──────────────────────────────────────────────────────────
+# KRX 직접 HTTP: ETF 구성종목 (PDF)
+# ──────────────────────────────────────────────────────────
+def _krx_get_isin(ticker):
+    """KRX에서 티커코드 → ISIN 코드 조회"""
+    url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+    params = {
+        'bld': 'dbms/comm/finder/finder_secuprodisu',
+        'mktsel': 'ETF',
+        'searchText': ticker,
+        'locale': 'ko_KR',
+    }
+    try:
+        text = _http_post(url, data=params, timeout=10)
+        data = json.loads(text)
+        blocks = data.get('block1', [])
+        for b in blocks:
+            short_cd = b.get('short_code', '').strip()
+            if short_cd == ticker:
+                return b.get('full_code', '')
+        if blocks:
+            return blocks[0].get('full_code', '')
+    except Exception:
+        pass
+    return ''
+
+
+def krx_get_etf_holdings(ticker, base_date):
+    """KRX 직접 HTTP → ETF 구성종목(PDF) 조회
+    Returns: [(종목명, 비중%), ...] 리스트
+    """
+    isin = _krx_get_isin(ticker)
+    if not isin:
+        return []
+
+    url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+    params = {
+        'bld': 'dbms/MDC/STAT/standard/MDCSTAT05901',
+        'locale': 'ko_KR',
+        'tboxisuCd_finder_secuprodisu1_3': ticker,
+        'isuCd': isin,
+        'isuCd2': ticker,
+        'codeNmisuCd_finder_secuprodisu1_3': '',
+        'param1isuCd_finder_secuprodisu1_3': '',
+        'strtDd': base_date,
+        'endDd': base_date,
+        'share': '1',
+        'money': '1',
+        'csvxls_isNo': 'false',
+    }
+
+    try:
+        text = _http_post(url, data=params, timeout=15)
+        data = json.loads(text)
+        items_raw = data.get('output', [])
+        if not items_raw:
+            return []
+
+        items = []
+        for row in items_raw:
+            stock_name = row.get('ISU_NM', row.get('ISU_ABBRV', '')).strip()
+            weight_str = row.get('COMPST_RTO', '0').replace(',', '')
+            try:
+                weight = float(weight_str)
+            except (ValueError, TypeError):
+                weight = 0
+            if weight > 0 and stock_name:
+                items.append((stock_name[:20], round(weight, 2)))
+
+        items.sort(key=lambda x: x[1], reverse=True)
+        return items[:Config.TOP_N_HOLDINGS]
+
+    except Exception:
+        return []
+
+
+# ──────────────────────────────────────────────────────────
+# 네이버: 종목명 조회 (KRX holdings 결과 보완용)
+# ──────────────────────────────────────────────────────────
+def naver_get_stock_name(code):
+    """네이버에서 종목코드 → 종목명 조회"""
+    try:
+        url = f"https://finance.naver.com/item/main.naver?code={code}"
+        html = _http_get(url, encoding='euc-kr')
+        m = re.search(r'<title>\s*:?\s*(.+?)\s*:', html)
+        if m:
+            name = m.group(1).strip()
+            if name and name != code:
+                return name
+        m = re.search(r'class="wrap_company"[^>]*>.*?<h2[^>]*>.*?<a[^>]*>([^<]+)', html, re.DOTALL)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return code
+
+
+# ============================================================================
 # 유틸리티
 # ============================================================================
-def _get_etf_tickers(date_str):
-    """ETF 티커 목록 조회 — pykrx 버전 호환 래퍼
-    방법 1: get_etf_ticker_list (구 버전)
-    방법 2: get_market_ticker_list(market='ETF') (신 버전)
-    방법 3: get_etf_ohlcv_by_ticker (최후 수단)
-    """
-    # 방법 1
-    try:
-        result = stock.get_etf_ticker_list(date_str)
-        if result is not None and len(result) > 0:
-            return list(result)
-    except (KeyError, AttributeError, Exception) as e:
-        pass
-
-    # 방법 2
-    try:
-        result = stock.get_market_ticker_list(date_str, market="ETF")
-        if result is not None and len(result) > 0:
-            print(f"  → get_market_ticker_list fallback 사용")
-            return list(result)
-    except (KeyError, AttributeError, Exception):
-        pass
-
-    # 방법 3: ETF 전체 시세에서 티커 추출
-    try:
-        df_all = stock.get_etf_ohlcv_by_ticker(date_str)
-        if df_all is not None and not df_all.empty:
-            print(f"  → get_etf_ohlcv_by_ticker fallback 사용")
-            return list(df_all.index)
-    except (KeyError, AttributeError, Exception):
-        pass
-
-    return []
-
-
-def _get_etf_name(ticker):
-    """ETF 이름 조회 — pykrx 버전 호환 래퍼"""
-    # 방법 1: ETF 전용
-    try:
-        name = stock.get_etf_ticker_name(ticker)
-        if name:
-            return name
-    except (KeyError, AttributeError, Exception):
-        pass
-
-    # 방법 2: 일반 주식 이름 (ETF도 조회 가능)
-    try:
-        name = stock.get_market_ticker_name(ticker)
-        if name:
-            return name
-    except (KeyError, AttributeError, Exception):
-        pass
-
-    return "N/A"
-
-
 def find_latest_business_date(max_lookback=30):
-    """최근 영업일 찾기
-    - KST(한국시간) 기준으로 계산 (Streamlit Cloud는 UTC)
-    - 주말 자동 건너뛰기
-    - 장 마감 전이면 전 영업일 사용
-    - 공휴일 대비 최대 30일 뒤로
-    """
-    # UTC → KST (UTC+9)
+    """최근 영업일 찾기 (네이버 차트 API로 확인)"""
     try:
         from zoneinfo import ZoneInfo
         now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
     except Exception:
-        # Python 3.8 이하 또는 zoneinfo 없는 환경
         now_kst = datetime.utcnow() + timedelta(hours=9)
 
     today_kst = now_kst.date()
@@ -134,28 +401,35 @@ def find_latest_business_date(max_lookback=30):
 
     print(f"  🕐 현재 KST: {now_kst.strftime('%Y-%m-%d %H:%M')}")
 
-    # 장 마감(15:30) 전이면 오늘 데이터 없을 수 있음 → 전일부터 탐색
-    start_offset = 0 if hour_kst >= 18 else 1  # 18시 이후면 당일 데이터 확보
+    start_offset = 0 if hour_kst >= 18 else 1
 
     for i in range(start_offset, max_lookback):
         d = today_kst - timedelta(days=i)
-
-        # 주말 건너뛰기 (토=5, 일=6)
         if d.weekday() >= 5:
             continue
-
         ds = d.strftime("%Y%m%d")
+
+        # 네이버 차트 API로 KOSPI 데이터 확인
         try:
-            tickers = _get_etf_tickers(ds)
-            if tickers is not None and len(tickers) > 0:
+            kospi = naver_get_index_history("KOSPI", ds, ds)
+            if not kospi.empty:
                 print(f"  ✅ 최근 영업일: {ds}")
                 return ds
-        except Exception as e:
-            print(f"  ⚠️ {ds} 조회 실패: {e}")
-            time.sleep(0.5)  # API 부하 방지
-            continue
+        except Exception:
+            pass
 
-    # 최후 수단: 주말 무시하고 단순 뒤로
+        # fallback: 대표 ETF 가격 확인
+        try:
+            price = naver_get_price_history("069500", ds, ds)
+            if not price.empty:
+                print(f"  ✅ 최근 영업일: {ds}")
+                return ds
+        except Exception:
+            pass
+
+        time.sleep(0.1)
+
+    # 최후 수단
     fallback = today_kst - timedelta(days=3)
     while fallback.weekday() >= 5:
         fallback -= timedelta(days=1)
@@ -165,7 +439,6 @@ def find_latest_business_date(max_lookback=30):
 
 
 def _timer(label):
-    """Step 타이머 (컨텍스트 매니저)"""
     class Timer:
         def __enter__(self):
             self.t0 = time.time()
@@ -184,6 +457,7 @@ def _load_cache(name):
         except Exception: pass
     return None
 
+
 def _save_cache(name, data):
     if Config.USE_CACHE:
         os.makedirs(Config.CACHE_DIR, exist_ok=True)
@@ -192,52 +466,30 @@ def _save_cache(name, data):
 
 
 # ============================================================================
-# Step 1: 전체 ETF 티커 + 이름 (가벼움)
+# Step 1: 전체 ETF 티커 + 이름 + 시장 데이터 (네이버 금융 1회 호출)
 # ============================================================================
 def step1_get_tickers_and_names(base_date):
     print("\n" + "="*60)
-    print(" Step 1: 전체 ETF 티커 + 이름 수집")
+    print(" Step 1: 전체 ETF 티커 + 이름 수집 (네이버 금융)")
     print("="*60)
 
     with _timer("Step 1"):
-        tickers = _get_etf_tickers(base_date)
-        print(f"  → 전체 ETF: {len(tickers)}개")
+        df_naver = naver_get_all_etfs()
+        print(f"  → 네이버 금융: {len(df_naver)}개 ETF")
 
-        if len(tickers) == 0:
+        if len(df_naver) == 0:
             print("  ⚠️ ETF 티커를 하나도 가져오지 못했습니다!")
-            print("  → 빈 DataFrame 반환")
             df = pd.DataFrame(columns=['ETF명'])
             df.index.name = '티커'
             return df
 
-        # 캐시 확인
-        cache_name = f"names_{base_date}.pkl"
-        cached = _load_cache(cache_name)
-        if cached and len(cached) >= len(tickers) * 0.9:
-            print(f"  → 💾 이름 캐시 로드: {len(cached)}개")
-            etf_names = cached
-        else:
-            # 멀티스레드로 이름 수집
-            etf_names = {}
-            def fetch_name(t):
-                try: return t, _get_etf_name(t)
-                except Exception: return t, "N/A"
+        # 이름만 추출 (시총/NAV 등은 Step 3에서 활용)
+        df = df_naver[['ETF명']].copy()
+        df.index.name = '티커'
 
-            with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
-                futs = {exe.submit(fetch_name, t): t for t in tickers}
-                with tqdm(total=len(tickers), desc="  이름 조회") as pbar:
-                    for f in as_completed(futs):
-                        t, name = f.result()
-                        etf_names[t] = name
-                        pbar.update(1)
+        # 메타데이터 캐시 저장 (Step 3에서 사용)
+        _save_cache(f"naver_meta_{base_date}.pkl", df_naver)
 
-            _save_cache(cache_name, etf_names)
-
-        df = pd.DataFrame({'티커': tickers,
-                            'ETF명': [etf_names.get(t, 'N/A') for t in tickers]})
-        df = df.set_index('티커')
-
-        # 검증
         print(f"  → DataFrame: {df.shape}, 컬럼: {df.columns.tolist()}")
         assert 'ETF명' in df.columns, f"ETF명 컬럼 없음! 컬럼: {df.columns.tolist()}"
         print(f"  ✅ {len(df)}개 ETF 이름 수집 완료")
@@ -245,7 +497,7 @@ def step1_get_tickers_and_names(base_date):
 
 
 # ============================================================================
-# Step 2: 유형 필터링 — 키워드 기반 (가벼움) + 카테고리 분류
+# Step 2: 유형 필터링 — 키워드 기반 + 카테고리 분류
 # ============================================================================
 def step2_type_filter_and_classify(df):
     print("\n" + "="*60)
@@ -255,7 +507,6 @@ def step2_type_filter_and_classify(df):
     t0 = time.time()
     before = len(df)
 
-    # 검증
     print(f"  → 입력 DataFrame: {df.shape}, 컬럼: {df.columns.tolist()}")
     if 'ETF명' not in df.columns:
         print("  ⚠️ ETF명 컬럼이 없습니다! 스킵합니다.")
@@ -291,10 +542,8 @@ def step2_type_filter_and_classify(df):
         if len(excluded) > 10:
             print(f"    ... 외 {len(excluded)-10}개")
 
-    # 필터 후 검증
     print(f"  → 필터 후: {df.shape}, 컬럼: {df.columns.tolist()}")
 
-    # 카테고리 분류
     if len(df) > 0 and 'ETF명' in df.columns:
         df = _classify(df)
     else:
@@ -308,18 +557,18 @@ def step2_type_filter_and_classify(df):
 
 
 # ============================================================================
-# Step 3: 시가총액 수집 → 100억 미만 제외
+# Step 3: 시가총액 필터 (네이버 데이터 활용 — API 호출 불필요)
 # ============================================================================
 def step3_market_cap_filter(df, base_date, min_cap=100):
     print("\n" + "="*60)
-    print(f" Step 3: 시가총액 수집 + {min_cap}억 이상 필터")
+    print(f" Step 3: 시가총액 필터 ({min_cap}억 이상)")
     print("="*60)
 
     t0 = time.time()
     before = len(df)
 
-    # 캐시 확인 (v2 — 이전 캐시 무시)
-    cache_name = f"mktcap_v2_{base_date}.pkl"
+    # 캐시 확인
+    cache_name = f"mktcap_v3_{base_date}.pkl"
     cached = _load_cache(cache_name)
     if cached is not None and '시가총액(억원)' in cached.columns:
         print(f"  → 💾 시총 캐시 로드: {len(cached)}개")
@@ -330,105 +579,39 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
         print(f"  ⏱️ Step 3: {time.time()-t0:.1f}초")
         return df
 
-    # ── 시가총액 수집 ──
-    cap_series = pd.Series(dtype=float, name='시가총액')
-    nav_series = pd.Series(dtype=float, name='NAV')
+    # 네이버 메타데이터에서 시가총액 가져오기
+    naver_meta = _load_cache(f"naver_meta_{base_date}.pkl")
+    if naver_meta is None:
+        print("  → 네이버 메타데이터 없음, 재수집...")
+        naver_meta = naver_get_all_etfs()
 
-    # 방법 1: KRX 전종목시세_ETF raw API (시가총액 + NAV + 종가 + 거래량 일괄 수집)
-    print("  → [1차] KRX 전종목시세_ETF raw API...")
-    try:
-        from pykrx.website import krx
-        raw = krx.전종목시세_ETF().fetch(base_date)
-        if raw is not None and not raw.empty:
-            print(f"    raw 행: {len(raw)}, 컬럼: {raw.columns.tolist()[:8]}...")
-            # 티커를 인덱스로
-            if 'ISU_SRT_CD' in raw.columns:
-                raw = raw.set_index('ISU_SRT_CD')
-            # 쉼표 제거 후 숫자 변환
-            def _to_num(s):
-                return pd.to_numeric(str(s).replace(',', ''), errors='coerce')
-            if 'MKTCAP' in raw.columns:
-                cap_series = raw['MKTCAP'].apply(_to_num)
-                print(f"    ✅ 시총 확보: {cap_series.notna().sum()}개")
-            if 'INVSTASST_NETASST_TOTAMT' in raw.columns:
-                nav_series = raw['INVSTASST_NETASST_TOTAMT'].apply(_to_num)
-                print(f"    ✅ NAV 확보: {nav_series.notna().sum()}개")
-            # 종가/거래량도 가져오기
-            if 'TDD_CLSPRC' in raw.columns and '종가' not in df.columns:
-                df['종가'] = raw['TDD_CLSPRC'].apply(_to_num)
-            if 'ACC_TRDVOL' in raw.columns and '거래량' not in df.columns:
-                df['거래량'] = raw['ACC_TRDVOL'].apply(_to_num)
+    if naver_meta is not None and not naver_meta.empty:
+        print(f"  → 네이버 시총 데이터: {len(naver_meta)}개")
+
+        meta_cols = ['시가총액(억원)', 'NAV(억원)', '종가', '거래량']
+        available_cols = [c for c in meta_cols if c in naver_meta.columns]
+        df = df.join(naver_meta[available_cols], how='left')
+
+        if '시가총액(억원)' in df.columns:
+            valid = df['시가총액(억원)'].notna() & (df['시가총액(억원)'] >= min_cap)
+            df = df[valid].copy()
+            df['시가총액(억원)'] = df['시가총액(억원)'].astype(int)
+
+            if not df.empty:
+                print(f"  → 시가총액 범위: {df['시가총액(억원)'].min():,} ~ {df['시가총액(억원)'].max():,}억원")
+
+            # 캐시 저장
+            cache_df = df[['시가총액(억원)']].copy()
+            if 'NAV(억원)' in df.columns:
+                cache_df['NAV(억원)'] = df['NAV(억원)']
+            _save_cache(cache_name, cache_df)
         else:
-            print(f"    ⚠️ raw 결과 비어있음")
-    except Exception as e:
-        print(f"    ⚠️ 실패: {e}")
-        import traceback; traceback.print_exc()
-
-    # 방법 2: get_etf_ohlcv_by_ticker (NAV는 있지만 시총은 없음 — fallback)
-    if cap_series.empty or cap_series.isna().all():
-        print("  → [2차] get_etf_ohlcv_by_ticker...")
-        try:
-            df_etf = stock.get_etf_ohlcv_by_ticker(base_date)
-            if not df_etf.empty:
-                print(f"    컬럼: {df_etf.columns.tolist()}, 행: {len(df_etf)}")
-                # ohlcv에는 시가총액이 없으므로, 종가 × 상장주식수 추정 불가
-                # 대신 get_market_cap_by_ticker 시도
-                df_mc = stock.get_market_cap_by_ticker(base_date)
-                overlap = set(df.index) & set(df_mc.index)
-                print(f"    ETF와 겹치는 티커: {len(overlap)}개")
-                if len(overlap) > 0 and '시가총액' in df_mc.columns:
-                    cap_series = df_mc['시가총액']
-                    print(f"    ✅ 시총 확보: {cap_series.notna().sum()}개")
-        except Exception as e:
-            print(f"    ⚠️ 실패: {e}")
-
-    # 방법 3: 개별 ETF (느리지만 확실 — 최후 수단)
-    if cap_series.empty or cap_series.isna().all():
-        print("  → [3차] 개별 ETF 시총 수집...")
-        cap_data = {}
-        def fetch_cap(ticker):
-            try:
-                r = stock.get_market_cap_by_date(base_date, base_date, ticker)
-                if not r.empty and '시가총액' in r.columns:
-                    return ticker, r['시가총액'].iloc[-1]
-            except Exception: pass
-            return ticker, np.nan
-
-        with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
-            futs = {exe.submit(fetch_cap, t): t for t in df.index}
-            with tqdm(total=len(df), desc="  시총 수집") as pbar:
-                for f in as_completed(futs):
-                    t, v = f.result()
-                    cap_data[t] = v
-                    pbar.update(1)
-        cap_series = pd.Series(cap_data, name='시가총액')
-        ok = cap_series.notna().sum()
-        print(f"    ✅ 개별 수집: {ok}/{len(df)}개")
-
-    # ── 시가총액 적용 ──
-    if not cap_series.empty and cap_series.notna().any():
-        df['_시가총액_raw'] = cap_series
-        valid = df['_시가총액_raw'].notna() & (df['_시가총액_raw'] >= min_cap * 1e8)
-        df = df[valid].copy()
-        df['시가총액(억원)'] = (df['_시가총액_raw'] / 1e8).round(0).astype(int)
-        df = df.drop(columns=['_시가총액_raw'], errors='ignore')
-
-        if not nav_series.empty and nav_series.notna().any():
-            df['NAV(억원)'] = (nav_series.reindex(df.index) / 1e8).round(2)
-
-        print(f"  → 시가총액 범위: {df['시가총액(억원)'].min():,} ~ {df['시가총액(억원)'].max():,}억원")
-
-        # 캐시 저장
-        cache_df = df[['시가총액(억원)']].copy()
-        if 'NAV(억원)' in df.columns:
-            cache_df['NAV(억원)'] = df['NAV(억원)']
-        _save_cache(cache_name, cache_df)
+            print("  ⚠️ 시가총액 컬럼 없음 — 필터 건너뜀")
     else:
-        print(f"  ⚠️ 시가총액 수집 실패 — 필터 건너뜀")
+        print("  ⚠️ 시가총액 수집 실패 — 필터 건너뜀")
 
     print(f"  → {before}개 → {len(df)}개 (시총 {min_cap}억+ 필터)")
 
-    # 기타 카테고리
     etc = df[df['대카테고리'] == '기타']
     if len(etc) > 0:
         print(f"\n  ⚠️ [기타: {len(etc)}개]")
@@ -440,7 +623,7 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
 
 
 # ============================================================================
-# Step 4: 최종 리스트 → 가격 / 상장일 / PDF 수집 (무거운 작업)
+# Step 4: 최종 리스트 → 가격 / 상장일 / PDF 수집
 # ============================================================================
 def step4_collect_all_data(df, base_date):
     print("\n" + "="*60)
@@ -450,22 +633,18 @@ def step4_collect_all_data(df, base_date):
     t0_total = time.time()
     tickers = df.index.tolist()
 
-    # 4-A: 가격 + KOSPI
     t0 = time.time()
     df, df_close, kospi_close = _collect_prices(df, tickers, base_date)
     print(f"  ⏱️ Step 4-A (가격): {time.time()-t0:.1f}초")
 
-    # 4-B: 설정일
     t0 = time.time()
     df = _collect_listing_dates(df, tickers, base_date)
     print(f"  ⏱️ Step 4-B (설정일): {time.time()-t0:.1f}초")
 
-    # 4-C: PDF → 별도 df_pdf
     t0 = time.time()
     df_pdf = _collect_pdf_holdings(df, tickers, base_date)
     print(f"  ⏱️ Step 4-C (PDF): {time.time()-t0:.1f}초")
 
-    # 4-D: 수익률 / BM / 순위
     t0 = time.time()
     df = _calc_returns(df, df_close, kospi_close, base_date)
     print(f"  ⏱️ Step 4-D (수익률): {time.time()-t0:.1f}초")
@@ -475,42 +654,30 @@ def step4_collect_all_data(df, base_date):
 
 
 # ──────────────────────────────────────────────────────────
-# 4-A: 가격
+# 4-A: 가격 (네이버 차트 API)
 # ──────────────────────────────────────────────────────────
 def _collect_prices(df, tickers, base_date):
-    print("\n  ── 4-A: 가격 데이터 ──")
+    print("\n  ── 4-A: 가격 데이터 (네이버 차트 API) ──")
 
     base_dt = datetime.strptime(base_date, "%Y%m%d")
     start_date = (base_dt - timedelta(days=Config.PRICE_HISTORY_DAYS)).strftime("%Y%m%d")
     ytd_start = base_dt.replace(month=1, day=1).strftime("%Y%m%d")
-    if ytd_start < start_date: start_date = ytd_start
+    if ytd_start < start_date:
+        start_date = ytd_start
 
     print(f"  → 기간: {start_date} ~ {base_date}")
 
-    # KOSPI
-    print("  → KOSPI 수집...")
+    # KOSPI (네이버)
+    print("  → KOSPI 수집 (네이버)...")
     try:
-        kdf = stock.get_index_ohlcv_by_date(start_date, base_date, "1001")
-        print(f"  → KOSPI 컬럼: {kdf.columns.tolist()}")
-        # 종가 컬럼 찾기
-        kospi = pd.Series(dtype=float)
-        for col_name in ['종가', '현재가', 'Close']:
-            if col_name in kdf.columns:
-                kospi = kdf[col_name]; break
-        if kospi.empty and not kdf.empty:
-            num_cols = kdf.select_dtypes(include=[np.number]).columns
-            if len(num_cols) >= 4:
-                kospi = kdf[num_cols[3]]
-            elif len(num_cols) > 0:
-                kospi = kdf[num_cols[-1]]
-        kospi = kospi.sort_index()
+        kospi = naver_get_index_history("KOSPI", start_date, base_date)
         print(f"  → KOSPI: {len(kospi)}일")
     except Exception as e:
-        print(f"  ⚠️  KOSPI 실패: {e}")
+        print(f"  ⚠️ KOSPI 실패: {e}")
         kospi = pd.Series(dtype=float)
 
     # 캐시
-    cache_file = os.path.join(Config.CACHE_DIR, f"price_v5_{base_date}.pkl")
+    cache_file = os.path.join(Config.CACHE_DIR, f"price_v6_{base_date}.pkl")
     if Config.USE_CACHE and os.path.exists(cache_file):
         try:
             with open(cache_file, 'rb') as f:
@@ -519,16 +686,12 @@ def _collect_prices(df, tickers, base_date):
             if len(common) / max(len(tickers), 1) > 0.9:
                 print(f"  → 💾 캐시: {len(common)}개 ETF")
                 return df, df_close[common], kospi
-        except Exception: pass
+        except Exception:
+            pass
 
-    # 방법 A: 날짜 일괄
-    print("  → 날짜 기준 일괄 수집...")
-    df_close = _fetch_prices_bulk(tickers, start_date, base_date)
-
-    # 방법 B: fallback
-    if df_close.empty or df_close.shape[1] < len(tickers) * 0.5:
-        print("  → 개별 티커 수집 전환...")
-        df_close = _fetch_prices_by_ticker(tickers, start_date, base_date)
+    # 네이버 차트 API로 개별 종가 수집
+    print(f"  → 네이버 차트 API: {len(tickers)}개 ETF 가격 수집...")
+    df_close = _fetch_prices_naver(tickers, start_date, base_date)
 
     if not df_close.empty:
         print(f"  → 가격: {df_close.shape[0]}일 × {df_close.shape[1]}개 ETF")
@@ -541,119 +704,67 @@ def _collect_prices(df, tickers, base_date):
     return df, df_close, kospi
 
 
-def _fetch_prices_bulk(tickers, start_date, base_date):
-    try:
-        sample = stock.get_etf_ohlcv_by_date(start_date, base_date, "069500")
-        if sample.empty:
-            return pd.DataFrame()
-        print(f"  → 069500 샘플 컬럼: {sample.columns.tolist()}")
-        dates = [d.strftime("%Y%m%d") for d in sample.index]
-    except Exception as e:
-        print(f"  ⚠️ 영업일 추출 실패: {e}")
-        return pd.DataFrame()
-
-    print(f"  → 영업일: {len(dates)}일 / 스레드: {Config.MAX_WORKERS}")
-
-    def fetch(d):
-        try:
-            r = stock.get_etf_ohlcv_by_ticker(d)
-            time.sleep(Config.API_DELAY)
-            if r is not None and not r.empty:
-                # 종가 컬럼 찾기 (다양한 이름 대응)
-                for col_name in ['종가', '현재가', 'Close']:
-                    if col_name in r.columns:
-                        return d, r[col_name]
-                # 못 찾으면 숫자 컬럼 중 첫번째
-                num_cols = r.select_dtypes(include=[np.number]).columns
-                if len(num_cols) > 0:
-                    return d, r[num_cols[0]]
-        except Exception:
-            pass
-        return d, None
-
-    daily = {}
-    t0 = time.time()
-    with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
-        futs = {exe.submit(fetch, d): d for d in dates}
-        with tqdm(total=len(dates), desc="  날짜별 가격") as pbar:
-            for f in as_completed(futs):
-                d, p = f.result()
-                if p is not None: daily[d] = p
-                pbar.update(1)
-    print(f"  ⏱️ {time.time()-t0:.1f}초 ({len(daily)}/{len(dates)}일 성공)")
-    if not daily: return pd.DataFrame()
-
-    out = pd.DataFrame(daily).T
-    out.index = pd.to_datetime(out.index, format="%Y%m%d")
-    out = out.sort_index()
-    common = [t for t in tickers if t in out.columns]
-    return out[common].apply(pd.to_numeric, errors='coerce')
-
-
-def _fetch_prices_by_ticker(tickers, start_date, base_date):
-    def fetch(t):
-        try:
-            o = stock.get_etf_ohlcv_by_date(start_date, base_date, t)
-            time.sleep(Config.API_DELAY)
-            if o is not None and not o.empty:
-                # 종가 컬럼 찾기
-                for col_name in ['종가', '현재가', 'Close']:
-                    if col_name in o.columns:
-                        return t, o[col_name]
-                num_cols = o.select_dtypes(include=[np.number]).columns
-                if len(num_cols) >= 4:
-                    return t, o[num_cols[3]]  # 보통 시/고/저/종 순
-                elif len(num_cols) > 0:
-                    return t, o[num_cols[-1]]
-        except Exception:
-            pass
-        return t, None
-
+def _fetch_prices_naver(tickers, start_date, end_date):
+    """네이버 차트 API로 개별 ETF 종가 수집 → DataFrame"""
     d = {}
+    failed = []
+
+    def fetch(ticker):
+        try:
+            s = naver_get_price_history(ticker, start_date, end_date)
+            time.sleep(Config.API_DELAY)
+            if s is not None and not s.empty:
+                return ticker, s
+        except Exception:
+            pass
+        return ticker, None
+
     with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
         futs = {exe.submit(fetch, t): t for t in tickers}
-        with tqdm(total=len(tickers), desc="  티커별 가격") as pbar:
+        with tqdm(total=len(tickers), desc="  네이버 가격") as pbar:
             for f in as_completed(futs):
                 t, s = f.result()
-                if s is not None: d[t] = s
+                if s is not None:
+                    d[t] = s
+                else:
+                    failed.append(t)
                 pbar.update(1)
-    print(f"  → 티커별 수집: {len(d)}/{len(tickers)}개 성공")
-    if not d: return pd.DataFrame()
-    return pd.DataFrame(d).sort_index().apply(pd.to_numeric, errors='coerce')
+
+    print(f"  → 수집 성공: {len(d)}/{len(tickers)}개 (실패: {len(failed)}개)")
+    if not d:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(d).sort_index().apply(pd.to_numeric, errors='coerce')
+    return out
 
 
 # ──────────────────────────────────────────────────────────
-# 4-B: 설정일 (1차 네이버 → 2차 pykrx)
+# 4-B: 설정일 (네이버 금융 — pykrx fallback 제거)
 # ──────────────────────────────────────────────────────────
 def _collect_listing_dates(df, tickers, base_date):
-    print("\n  ── 4-B: 설정일 수집 ──")
+    print("\n  ── 4-B: 설정일 수집 (네이버 금융) ──")
 
-    cache_file = os.path.join(Config.CACHE_DIR, "listing_dates_v3.pkl")
+    cache_file = os.path.join(Config.CACHE_DIR, "listing_dates_v4.pkl")
     cached = {}
     if Config.USE_CACHE and os.path.exists(cache_file):
         try:
-            with open(cache_file, 'rb') as f: cached = pickle.load(f)
-        except Exception: cached = {}
+            with open(cache_file, 'rb') as f:
+                cached = pickle.load(f)
+        except Exception:
+            cached = {}
 
     to_fetch = [t for t in tickers if t not in cached]
     print(f"  → 신규: {len(to_fetch)}개 / 캐시: {len(tickers)-len(to_fetch)}개")
 
     if to_fetch:
-        # 1차: 네이버
-        print("  → [1차] 네이버 금융...")
+        print("  → 네이버 금융 설정일 수집...")
         naver = _naver_listing_dates(to_fetch)
         cached.update(naver)
 
-        # 2차: pykrx fallback
-        missing = [t for t in to_fetch if not cached.get(t)]
-        if missing:
-            print(f"  → [2차] pykrx fallback: {len(missing)}개...")
-            pykrx = _pykrx_listing_dates(missing, base_date)
-            cached.update(pykrx)
-
         if Config.USE_CACHE:
             os.makedirs(Config.CACHE_DIR, exist_ok=True)
-            with open(cache_file, 'wb') as f: pickle.dump(cached, f)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(cached, f)
 
     ok = sum(1 for t in tickers if cached.get(t))
     print(f"  → 설정일 완료: {ok}/{len(tickers)}개")
@@ -663,15 +774,19 @@ def _collect_listing_dates(df, tickers, base_date):
 
 def _naver_listing_dates(tickers):
     results = {}
+
     def fetch(ticker):
         try:
             url = f"https://finance.naver.com/item/main.naver?code={ticker}"
             req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             html = urlopen(req, timeout=5).read().decode('euc-kr', errors='ignore')
             m = re.search(r'설정일.*?(\d{4}\.\d{2}\.\d{2})', html, re.DOTALL)
-            if not m: m = re.search(r'상장일.*?(\d{4}\.\d{2}\.\d{2})', html, re.DOTALL)
-            if m: return ticker, m.group(1).replace('.', '-')
-        except Exception: pass
+            if not m:
+                m = re.search(r'상장일.*?(\d{4}\.\d{2}\.\d{2})', html, re.DOTALL)
+            if m:
+                return ticker, m.group(1).replace('.', '-')
+        except Exception:
+            pass
         return ticker, ''
 
     with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
@@ -679,80 +794,59 @@ def _naver_listing_dates(tickers):
         with tqdm(total=len(tickers), desc="  네이버 설정일") as pbar:
             for f in as_completed(futs):
                 t, d = f.result()
-                if d: results[t] = d
+                if d:
+                    results[t] = d
                 pbar.update(1)
     print(f"  → 네이버 성공: {len(results)}/{len(tickers)}")
     return results
 
 
-def _pykrx_listing_dates(tickers, base_date):
-    results = {}
-    def fetch(ticker):
-        try:
-            o = stock.get_etf_ohlcv_by_date("20020101", base_date, ticker)
-            time.sleep(Config.API_DELAY)
-            if not o.empty: return ticker, o.index[0].strftime("%Y-%m-%d")
-        except Exception: pass
-        return ticker, ''
-
-    with ThreadPoolExecutor(max_workers=8) as exe:
-        futs = {exe.submit(fetch, t): t for t in tickers}
-        with tqdm(total=len(tickers), desc="  pykrx 설정일") as pbar:
-            for f in as_completed(futs):
-                t, d = f.result()
-                if d: results[t] = d
-                pbar.update(1)
-    return results
-
-
 # ──────────────────────────────────────────────────────────
-# 4-C: PDF 구성종목 → 피벗 매트릭스
+# 4-C: PDF 구성종목 → 피벗 매트릭스 (KRX 직접 HTTP)
 # ──────────────────────────────────────────────────────────
 def _collect_pdf_holdings(df, tickers, base_date):
-    """구성종목 수집 → 피벗 매트릭스 df_pdf 반환
-       행: ETF 티커, 열: 종목명(ㄱㄴㄷ순), 값: 보유비중(%)
-    """
-    print(f"\n  ── 4-C: 구성종목 Top {Config.TOP_N_HOLDINGS} 수집 ──")
+    """구성종목 수집 → 피벗 매트릭스 df_pdf 반환"""
+    print(f"\n  ── 4-C: 구성종목 Top {Config.TOP_N_HOLDINGS} 수집 (KRX 직접) ──")
 
-    cache_file = os.path.join(Config.CACHE_DIR, f"holdings_v3_{base_date}.pkl")
+    cache_file = os.path.join(Config.CACHE_DIR, f"holdings_v4_{base_date}.pkl")
     cached = {}
     if Config.USE_CACHE and os.path.exists(cache_file):
         try:
-            with open(cache_file, 'rb') as f: cached = pickle.load(f)
-        except Exception: cached = {}
+            with open(cache_file, 'rb') as f:
+                cached = pickle.load(f)
+        except Exception:
+            cached = {}
 
     to_fetch = [t for t in tickers if t not in cached]
     print(f"  → 신규: {len(to_fetch)}개 / 캐시: {len(tickers)-len(to_fetch)}개")
 
     if to_fetch:
-        print("  → pykrx PDF 조회...")
-        pykrx_results = _pykrx_holdings(to_fetch, base_date)
-        cached.update(pykrx_results)
+        print("  → KRX 구성종목 조회...")
+        krx_results = _krx_holdings_batch(to_fetch, base_date)
+        cached.update(krx_results)
 
-        missing_count = sum(1 for t in to_fetch if t not in cached or len(cached.get(t, [])) == 0)
+        missing_count = sum(1 for t in to_fetch
+                           if t not in cached or len(cached.get(t, [])) == 0)
         if missing_count:
             print(f"  → 비중 없는 ETF(해외 등): {missing_count}개 → 빈칸 처리")
 
         if Config.USE_CACHE:
             os.makedirs(Config.CACHE_DIR, exist_ok=True)
-            with open(cache_file, 'wb') as f: pickle.dump(cached, f)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(cached, f)
 
     ok = sum(1 for t in tickers if cached.get(t) and len(cached[t]) > 0)
     print(f"  → 구성종목 완료: {ok}/{len(tickers)}개")
 
-    # ── 피벗 매트릭스 생성 ──
-    # cached: {ticker: [(종목명, 비중%), ...]}
-    # → 행=ETF, 열=종목명(ㄱㄴㄷ), 값=비중
+    # 피벗 매트릭스 생성
     all_stocks = set()
     for t in tickers:
         for name, w in cached.get(t, []):
             all_stocks.add(name)
 
-    # ㄱㄴㄷ 정렬
     sorted_stocks = sorted(all_stocks, key=lambda x: x)
     print(f"  → 전체 고유 종목 수: {len(sorted_stocks)}개")
 
-    # ETF명 컬럼 + 종목별 비중 (빈칸은 NaN → 엑셀에서 정렬 가능)
     pdf_data = {}
     for ticker in tickers:
         row = {'ETF명': df.at[ticker, 'ETF명'] if ticker in df.index else ''}
@@ -764,7 +858,6 @@ def _collect_pdf_holdings(df, tickers, base_date):
     df_pdf = pd.DataFrame.from_dict(pdf_data, orient='index')
     df_pdf.index.name = '티커'
 
-    # 비중이 있는 셀 수 통계
     stock_cols = [c for c in df_pdf.columns if c != 'ETF명']
     filled = df_pdf[stock_cols].notna().sum().sum()
     print(f"  → 매트릭스: {len(df_pdf)} ETF × {len(sorted_stocks)} 종목 ({filled:,.0f}개 셀 채움)")
@@ -772,86 +865,43 @@ def _collect_pdf_holdings(df, tickers, base_date):
     return df_pdf
 
 
-def _pykrx_holdings(tickers, base_date):
-    """pykrx PDF: [(종목명, 비중%), ...] 튜플 리스트 반환"""
+def _krx_holdings_batch(tickers, base_date):
+    """KRX 직접 HTTP로 구성종목 배치 수집"""
     results = {}
 
-    # 종목코드 → 종목명 캐시
-    stock_name_cache = {}
-    def get_stock_name(code):
-        if code in stock_name_cache:
-            return stock_name_cache[code]
-        try:
-            name = stock.get_market_ticker_name(code)
-            if name:
-                stock_name_cache[code] = name
-                return name
-        except Exception:
-            pass
-        return code
+    # ETF 티커 집합 (ETF-in-ETF 제외용)
+    etf_set = set()
+    try:
+        naver_df = naver_get_all_etfs()
+        etf_set = set(naver_df.index)
+    except Exception:
+        pass
 
     def fetch(ticker):
         try:
-            pdf = stock.get_etf_portfolio_deposit_file(ticker, base_date)
+            items = krx_get_etf_holdings(ticker, base_date)
             time.sleep(Config.API_DELAY)
-            if pdf is None or pdf.empty:
-                return ticker, []
-
-            # 비중 컬럼 찾기
-            weight_col = None
-            for c in pdf.columns:
-                if '비중' in str(c) or '구성비' in str(c) or 'weight' in str(c).lower():
-                    weight_col = c; break
-
-            # 비중 컬럼 없으면 빈 리스트 (해외 ETF 등)
-            if not weight_col:
-                return ticker, []
-
-            # ETF 티커 목록 (ETF-in-ETF 제외용)
-            etf_tickers_set = set(_get_etf_tickers(base_date))
-
-            items = []
-            pdf_sorted = pdf.sort_values(weight_col, ascending=False)
-            for idx, row in pdf_sorted.head(Config.TOP_N_HOLDINGS + 5).iterrows():
-                if len(items) >= Config.TOP_N_HOLDINGS:
-                    break
-                w = row[weight_col]
-                if not pd.notna(w) or w <= 0:
+            filtered = []
+            for name, w in items:
+                if name.isdigit() and len(name) == 6 and name in etf_set:
                     continue
-                code = str(idx)
-
-                # 6자리 숫자 코드인 경우
-                if code.isdigit() and len(code) == 6:
-                    # ETF-in-ETF → 제외
-                    if code in etf_tickers_set:
-                        continue
-                    name = get_stock_name(code)
-                    # 종목명 변환 실패(여전히 코드) → 제외
-                    if name == code:
-                        continue
-                else:
-                    # 한글이 아닌 알파벳/숫자 코드 → 제외 (해외종목 등)
-                    if not re.search(r'[가-힣]', code):
-                        continue
-                    name = code
-
-                name = name[:20]
-                items.append((name, round(float(w), 2)))
-
-            return ticker, items
+                filtered.append((name, w))
+            return ticker, filtered[:Config.TOP_N_HOLDINGS]
         except Exception:
             pass
         return ticker, []
 
-    with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
+    # KRX에 너무 빠르게 요청하면 차단되므로 스레드 수 제한
+    with ThreadPoolExecutor(max_workers=min(Config.MAX_WORKERS, 4)) as exe:
         futs = {exe.submit(fetch, t): t for t in tickers}
-        with tqdm(total=len(tickers), desc="  pykrx PDF") as pbar:
+        with tqdm(total=len(tickers), desc="  KRX 구성종목") as pbar:
             for f in as_completed(futs):
                 t, items = f.result()
-                if items: results[t] = items
+                if items:
+                    results[t] = items
                 pbar.update(1)
 
-    print(f"  → pykrx 성공: {len(results)}/{len(tickers)}")
+    print(f"  → KRX 성공: {len(results)}/{len(tickers)}")
     return results
 
 
@@ -895,15 +945,16 @@ def _calc_returns(df, df_close, kospi_close, base_date):
         print(f"    최종: {kc.iloc[-1]:,.0f} ({kc.index[-1].strftime('%Y-%m-%d')})")
         k1m = -1 - min(21, kn-1)
         print(f"    1M 기준: {kc.iloc[k1m]:,.0f} ({kc.index[k1m].strftime('%Y-%m-%d')})")
-        for l, r in bm.items(): print(f"    {l}: {r:+.2f}%")
+        for l, r in bm.items():
+            print(f"    {l}: {r:+.2f}%")
 
         for label in ['1M', '3M', '6M', '1Y']:
             df[f'BM_{label}(%)'] = (df[f'수익률_{label}(%)'] - bm[label]).round(2)
         df['BM_YTD(%)'] = (df['수익률_YTD(%)'] - bm['YTD']).round(2)
 
-    # 순위
     if 'BM_YTD(%)' in df.columns:
-        df['순위(YTD_BM+)'] = df['BM_YTD(%)'].rank(ascending=False, method='min', na_option='bottom').astype(int)
+        df['순위(YTD_BM+)'] = df['BM_YTD(%)'].rank(
+            ascending=False, method='min', na_option='bottom').astype(int)
 
     return df
 
@@ -915,7 +966,6 @@ def _classify(df):
     def classify(name):
         n = str(name); u = n.upper()
 
-        # 원자재
         if any(kw in u for kw in ['금현물','금선물','골드','GOLD','국제금','금액티브','금ETF']): return '원자재','금',''
         if any(kw in u for kw in ['은현물','은선물','실버','SILVER']): return '원자재','은',''
         if any(kw in u for kw in ['원유','WTI','브렌트','BRENT','오일']): return '원자재','원유',''
@@ -924,24 +974,20 @@ def _classify(df):
         if any(kw in u for kw in ['곡물','농산물','옥수수','대두','밀']): return '원자재','농산물',''
         if any(kw in u for kw in ['원자재','커머디티','COMMODITY']): return '원자재','원자재(종합)',''
 
-        # 통화/환율
         if any(kw in u for kw in ['달러','USD','달러선물','미국달러']): return '통화/환율','달러',''
         if any(kw in u for kw in ['엔화','엔선물','JPY']): return '통화/환율','엔화',''
         if any(kw in u for kw in ['유로','EUR']): return '통화/환율','유로',''
         if any(kw in u for kw in ['위안','CNY','CNH']): return '통화/환율','위안',''
         if any(kw in u for kw in ['환헤지','통화','외환','FX']): return '통화/환율','통화(기타)',''
 
-        # 리츠/부동산
         if any(kw in u for kw in ['리츠','REITS','REIT','부동산']): return '리츠/부동산','리츠',''
 
-        # 그룹주
         if '그룹' in n:
             grp = n.split('그룹')[0]
             for pfx in ['TIGER ','KODEX ','ACE ','KBSTAR ','SOL ','HANARO ','ARIRANG ','KOSEF ','PLUS ']:
                 grp = grp.replace(pfx.strip(),'').strip()
             return '그룹주', grp+'그룹', ''
 
-        # 해외주식
         if any(kw in u for kw in ['미국','나스닥','NASDAQ','S&P','S&P500','다우','필라델피아','FANG','NYSE','미국빅테크','미국테크']):
             return '해외주식','미국',_sub(u,'미국')
         if any(kw in u for kw in ['일본','니케이','NIKKEI','TOPIX','도쿄']): return '해외주식','일본',_sub(u,'일본')
@@ -958,7 +1004,6 @@ def _classify(df):
         if any(kw in u for kw in ['선진국','MSCI WORLD','ACWI','글로벌']): return '해외주식','글로벌/선진국',''
         if any(kw in u for kw in ['신흥국','EM','EMERGING']): return '해외주식','신흥국',''
 
-        # 섹터/테마
         if any(kw in u for kw in ['반도체','팹리스']): return '섹터/테마','반도체',''
         if any(kw in u for kw in ['2차전지','배터리','리튬','양극재','음극재']): return '섹터/테마','2차전지/배터리',''
         if any(kw in u for kw in ['AI','인공지능']): return '섹터/테마','AI',''
@@ -996,11 +1041,9 @@ def _classify(df):
         if any(kw in u for kw in ['플랫폼','인터넷','이커머스','커머스']): return '섹터/테마','플랫폼/인터넷',''
         if any(kw in u for kw in ['IT','테크','기술','ICT']): return '섹터/테마','IT/테크',''
 
-        # 배당/인컴
         if any(kw in u for kw in ['배당','고배당','배당성장','DIVIDEND','프리미엄','월배당','분배','인컴']):
             return '배당/인컴','배당',''
 
-        # 시장대표
         if re.search(r'200(?:TR)?$', n.strip().upper()) or 'KOSPI200' in u or 'KOSPI 200' in u: return '시장대표','KOSPI200',''
         if any(kw in u for kw in ['코스닥','KOSDAQ']): return '시장대표','코스닥',''
         if any(kw in u for kw in ['중소형','중소']): return '시장대표','중소형주',''
@@ -1009,7 +1052,6 @@ def _classify(df):
         if any(kw in u for kw in ['코스피','KOSPI','KRX300','KRX 300','TOP10','TOP30','TOP 10','대형']):
             return '시장대표','대형주',''
 
-        # 스마트베타
         if any(kw in u for kw in ['모멘텀','MOMENTUM']): return '스마트베타','모멘텀',''
         if any(kw in u for kw in ['밸류','가치','VALUE']): return '스마트베타','밸류',''
         if any(kw in u for kw in ['퀄리티','QUALITY','우량']): return '스마트베타','퀄리티',''
@@ -1026,9 +1068,11 @@ def _classify(df):
     df['소카테고리'] = results.apply(lambda x: x[2])
 
     print("\n  [대카테고리]")
-    for c, n in df['대카테고리'].value_counts().items(): print(f"    {c}: {n}개")
+    for c, n in df['대카테고리'].value_counts().items():
+        print(f"    {c}: {n}개")
     print("\n  [중카테고리 상위 20]")
-    for c, n in df['중카테고리'].value_counts().head(20).items(): print(f"    {c}: {n}개")
+    for c, n in df['중카테고리'].value_counts().head(20).items():
+        print(f"    {c}: {n}개")
     return df
 
 
@@ -1096,7 +1140,6 @@ def step5_save(df, df_close, df_pdf, base_date):
             cap = sub['시가총액(억원)'].sum() if '시가총액(억원)' in sub.columns else 0
             print(f"    {cat}: {len(sub)}개 ({cap:,.0f}억)")
 
-    # ── df_universe 컬럼 순서 (Top 없음) ──
     cols = ['ETF명', '시가총액(억원)', 'NAV(억원)', '설정일',
             '대카테고리', '중카테고리', '소카테고리',
             '순위(YTD_BM+)',
@@ -1109,30 +1152,25 @@ def step5_save(df, df_close, df_pdf, base_date):
     cols = [c for c in cols if c in df.columns]
     df_export = df[cols].copy().fillna('')
 
-    # ── 엑셀: 유니버스 + PDF 시트 분리 ──
     f_master = os.path.join(Config.OUTPUT_DIR, f"etf_universe_{base_date}.xlsx")
     with pd.ExcelWriter(f_master, engine='openpyxl') as writer:
         df_export.to_excel(writer, sheet_name='유니버스')
         if df_pdf is not None and not df_pdf.empty:
-            # df_pdf도 시가총액 순으로 정렬
             pdf_order = [t for t in df.index if t in df_pdf.index]
             df_pdf_sorted = df_pdf.loc[[t for t in pdf_order if t in df_pdf.index]]
             df_pdf_sorted.to_excel(writer, sheet_name='구성종목(PDF)')
     print(f"\n  📁 유니버스 + PDF: {f_master}")
 
-    # ── 종가 CSV ──
     if df_close is not None and not df_close.empty:
         f_p = os.path.join(Config.OUTPUT_DIR, f"etf_prices_{base_date}.csv")
         df_close.to_csv(f_p, encoding='utf-8-sig')
         print(f"  📁 종가: {f_p}")
 
-    # ── 티커 CSV ──
     f_t = os.path.join(Config.OUTPUT_DIR, f"etf_tickers_{base_date}.csv")
     tc = [c for c in ['ETF명','설정일','대카테고리','중카테고리','소카테고리'] if c in df.columns]
     df[tc].to_csv(f_t, encoding='utf-8-sig')
     print(f"  📁 티커: {f_t}")
 
-    # ── Top 15 출력 ──
     print(f"\n  {'─'*110}")
     print(f"  📋 Top 15 (시가총액)")
     print(f"  {'─'*110}")
@@ -1144,7 +1182,6 @@ def step5_save(df, df_close, df_pdf, base_date):
         ytd = f"{r['수익률_YTD(%)']:+.2f}%" if r.get('수익률_YTD(%)','') != '' else "N/A"
         bm = f"{r['BM_YTD(%)']:+.2f}%" if r.get('BM_YTD(%)','') != '' else "N/A"
         rnk = str(r.get('순위(YTD_BM+)',''))
-        # PDF top1 가져오기 (피벗 매트릭스에서 최대 비중 종목)
         top1 = ''
         if df_pdf is not None and idx in df_pdf.index:
             row_pdf = df_pdf.loc[idx].drop('ETF명', errors='ignore')
@@ -1162,10 +1199,9 @@ def step5_save(df, df_close, df_pdf, base_date):
 # 진단 함수 — Streamlit 앱에서 호출하여 문제 파악
 # ============================================================================
 def diagnose():
-    """KRX API 연결 및 데이터 수집 단계별 진단"""
+    """네이버 금융 / KRX API 연결 및 데이터 수집 단계별 진단"""
     results = {}
 
-    # 1. 영업일 찾기
     print("=== [진단 1] 영업일 찾기 ===")
     try:
         base_date = find_latest_business_date()
@@ -1178,14 +1214,16 @@ def diagnose():
         print(f"  ❌ 실패: {e}")
         return results
 
-    # 2. ETF 티커 목록
-    print("\n=== [진단 2] ETF 티커 목록 ===")
+    print("\n=== [진단 2] 네이버 ETF 전종목 조회 ===")
     try:
-        tickers = _get_etf_tickers(base_date)
-        results['tickers_count'] = len(tickers)
-        results['tickers_ok'] = len(tickers) > 0
-        results['tickers_sample'] = tickers[:5] if tickers else []
-        print(f"  ✅ {len(tickers)}개 (샘플: {tickers[:5]})")
+        df_all = naver_get_all_etfs()
+        results['tickers_count'] = len(df_all)
+        results['tickers_ok'] = len(df_all) > 0
+        results['tickers_sample'] = df_all.index[:5].tolist() if not df_all.empty else []
+        print(f"  ✅ {len(df_all)}개 (샘플: {df_all.index[:5].tolist()})")
+        if not df_all.empty:
+            print(f"  컬럼: {df_all.columns.tolist()}")
+            print(f"  시가총액 범위: {df_all['시가총액(억원)'].min():.0f} ~ {df_all['시가총액(억원)'].max():.0f}억")
     except Exception as e:
         results['tickers_count'] = 0
         results['tickers_ok'] = False
@@ -1193,75 +1231,65 @@ def diagnose():
         print(f"  ❌ 실패: {e}")
         return results
 
-    # 3. ETF 이름 조회 (1개만)
-    print("\n=== [진단 3] ETF 이름 조회 ===")
-    try:
-        test_ticker = tickers[0]
-        name = _get_etf_name(test_ticker)
-        results['name_test'] = f"{test_ticker} → {name}"
-        results['name_ok'] = name not in [None, '', 'N/A']
-        print(f"  ✅ {test_ticker} → {name}")
-    except Exception as e:
-        results['name_ok'] = False
-        results['name_error'] = str(e)
-        print(f"  ❌ 실패: {e}")
-
-    # 4. KRX 전종목시세_ETF (시가총액 소스)
-    print("\n=== [진단 4] KRX 전종목시세_ETF (시가총액) ===")
-    try:
-        from pykrx.website import krx
-        raw = krx.전종목시세_ETF().fetch(base_date)
-        if raw is not None and not raw.empty:
-            results['mktcap_rows'] = len(raw)
-            results['mktcap_cols'] = raw.columns.tolist()
-            results['mktcap_ok'] = 'MKTCAP' in raw.columns
-            results['mktcap_sample'] = raw.head(3).to_dict() if len(raw) > 0 else {}
-            print(f"  ✅ {len(raw)}행, MKTCAP 컬럼: {'MKTCAP' in raw.columns}")
-            print(f"  컬럼: {raw.columns.tolist()}")
-        else:
-            results['mktcap_ok'] = False
-            results['mktcap_rows'] = 0
-            print(f"  ❌ 빈 결과")
-    except Exception as e:
-        results['mktcap_ok'] = False
-        results['mktcap_error'] = str(e)
-        print(f"  ❌ 실패: {e}")
-        import traceback; traceback.print_exc()
-
-    # 5. get_etf_ohlcv_by_ticker (가격 소스)
-    print("\n=== [진단 5] get_etf_ohlcv_by_ticker ===")
-    try:
-        df_ohlcv = stock.get_etf_ohlcv_by_ticker(base_date)
-        results['ohlcv_rows'] = len(df_ohlcv) if df_ohlcv is not None else 0
-        results['ohlcv_ok'] = df_ohlcv is not None and not df_ohlcv.empty
-        if results['ohlcv_ok']:
-            results['ohlcv_cols'] = df_ohlcv.columns.tolist()
-            print(f"  ✅ {len(df_ohlcv)}행, 컬럼: {df_ohlcv.columns.tolist()}")
-        else:
-            print(f"  ❌ 빈 결과")
-    except Exception as e:
-        results['ohlcv_ok'] = False
-        results['ohlcv_error'] = str(e)
-        print(f"  ❌ 실패: {e}")
-
-    # 6. get_etf_ohlcv_by_date (개별 종가 소스)
-    print("\n=== [진단 6] get_etf_ohlcv_by_date (069500) ===")
+    print("\n=== [진단 3] 네이버 차트 API (069500 KODEX 200) ===")
     try:
         start_test = (datetime.strptime(base_date, "%Y%m%d") - timedelta(days=7)).strftime("%Y%m%d")
-        df_test = stock.get_etf_ohlcv_by_date(start_test, base_date, "069500")
-        results['ohlcv_date_ok'] = df_test is not None and not df_test.empty
-        if results['ohlcv_date_ok']:
-            print(f"  ✅ {len(df_test)}일, 컬럼: {df_test.columns.tolist()}")
+        price = naver_get_price_history("069500", start_test, base_date)
+        results['price_ok'] = not price.empty
+        if not price.empty:
+            print(f"  ✅ {len(price)}일, 최근 종가: {price.iloc[-1]:,.0f}")
         else:
             print(f"  ❌ 빈 결과")
     except Exception as e:
-        results['ohlcv_date_ok'] = False
-        results['ohlcv_date_error'] = str(e)
+        results['price_ok'] = False
+        results['price_error'] = str(e)
         print(f"  ❌ 실패: {e}")
 
-    # 종합
+    print("\n=== [진단 4] 네이버 KOSPI 지수 ===")
+    try:
+        start_test = (datetime.strptime(base_date, "%Y%m%d") - timedelta(days=7)).strftime("%Y%m%d")
+        kospi = naver_get_index_history("KOSPI", start_test, base_date)
+        results['kospi_ok'] = not kospi.empty
+        if not kospi.empty:
+            print(f"  ✅ {len(kospi)}일, 최근: {kospi.iloc[-1]:,.2f}")
+        else:
+            print(f"  ❌ 빈 결과")
+    except Exception as e:
+        results['kospi_ok'] = False
+        results['kospi_error'] = str(e)
+        print(f"  ❌ 실패: {e}")
+
+    print("\n=== [진단 5] KRX 구성종목 (069500) ===")
+    try:
+        isin = _krx_get_isin("069500")
+        results['isin_ok'] = bool(isin)
+        print(f"  ISIN: {isin or '없음'}")
+        if isin:
+            holdings = krx_get_etf_holdings("069500", base_date)
+            results['holdings_ok'] = len(holdings) > 0
+            print(f"  ✅ 구성종목: {len(holdings)}개")
+            for name, w in holdings[:5]:
+                print(f"    - {name}: {w}%")
+        else:
+            results['holdings_ok'] = False
+            print(f"  ❌ ISIN 조회 실패")
+    except Exception as e:
+        results['holdings_ok'] = False
+        results['holdings_error'] = str(e)
+        print(f"  ❌ 실패: {e}")
+
+    print("\n=== [진단 6] 네이버 설정일 (069500) ===")
+    try:
+        dates = _naver_listing_dates(["069500"])
+        results['listing_ok'] = bool(dates.get("069500"))
+        print(f"  ✅ 069500 → {dates.get('069500', '없음')}")
+    except Exception as e:
+        results['listing_ok'] = False
+        results['listing_error'] = str(e)
+        print(f"  ❌ 실패: {e}")
+
     all_ok = all(results.get(k, False) for k in
-                 ['base_date_ok','tickers_ok','name_ok','mktcap_ok','ohlcv_ok','ohlcv_date_ok'])
+                 ['base_date_ok','tickers_ok','price_ok','kospi_ok','holdings_ok','listing_ok'])
     results['all_ok'] = all_ok
     print(f"\n{'='*60}")
     print(f"  종합: {'✅ 전체 정상' if all_ok else '❌ 일부 실패 — 위 결과 확인'}")
@@ -1274,30 +1302,22 @@ def diagnose():
 # ============================================================================
 def build_universe():
     print("╔" + "═"*58 + "╗")
-    print("║   한국 상장 ETF 유니버스 빌더 v5.3                       ║")
+    print("║   한국 상장 ETF 유니버스 빌더 v6.0 (네이버 금융)          ║")
     print("╚" + "═"*58 + "╝")
 
     t_start = time.time()
 
     base_date = Config.BASE_DATE or find_latest_business_date()
-    Config.BASE_DATE = base_date    # 저장
+    Config.BASE_DATE = base_date
     print(f"\n  📅 기준일: {base_date}")
     print(f"  💰 최소 시총: {Config.MIN_MARKET_CAP_BILLIONS}억원")
     print(f"  ⚡ 스레드: {Config.MAX_WORKERS} / 캐시: {Config.USE_CACHE}")
+    print(f"  📡 데이터: 네이버 금융 + KRX 직접 HTTP")
 
-    # Step 1: 가벼운 — 티커+이름만
     df = step1_get_tickers_and_names(base_date)
-
-    # Step 2: 가벼운 — 유형 필터 (키워드)
     df = step2_type_filter_and_classify(df)
-
-    # Step 3: 중간 — 시총 데이터 → 필터
     df = step3_market_cap_filter(df, base_date, Config.MIN_MARKET_CAP_BILLIONS)
-
-    # Step 4: 무거운 — 최종 리스트에만 가격/상장일/PDF
     df, df_close, df_pdf = step4_collect_all_data(df, base_date)
-
-    # Step 5: 저장
     step5_save(df, df_close, df_pdf, base_date)
 
     elapsed = time.time() - t_start

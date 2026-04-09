@@ -16,9 +16,10 @@
 | **수익률 비교** | 국내 ETF / 글로벌 지수 / 미국 ETF 기간별 비교 |
 
 ## 데이터 소스
-- **한국 ETF**: pykrx (KRX)
+- **한국 ETF**: 네이버 금융 API + KRX 직접 HTTP (pykrx 의존성 제거)
 - **글로벌 지수/미국 ETF**: yfinance (Yahoo Finance)
-- **상장일**: 네이버 금융 → pykrx fallback
+- **상장일/설정일**: 네이버 금융
+- **구성종목(PDF)**: KRX 직접 HTTP
 
 ## 로컬 실행
 ```bash

@@ -1,5 +1,5 @@
 setuptools>=69.0
-pykrx
+requests
 pandas>=1.5
 numpy
 openpyxl

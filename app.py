@@ -180,8 +180,8 @@ def start_global_collection():
 
 
 def run_diagnosis():
-    """KRX API 연결 상태 진단 — 사이드바에서 호출"""
-    st.subheader("🩺 KRX 연결 진단")
+    """네이버 금융 / KRX 연결 상태 진단 — 사이드바에서 호출"""
+    st.subheader("🩺 데이터 소스 연결 진단")
     with st.spinner("진단 중... (약 10~30초)"):
         try:
             results = diagnose()
@@ -191,11 +191,11 @@ def run_diagnosis():
 
     checks = [
         ('base_date_ok',  '영업일 탐색'),
-        ('tickers_ok',    'ETF 티커 목록'),
-        ('name_ok',       'ETF 이름 조회'),
-        ('mktcap_ok',     '시가총액 데이터 (전종목시세_ETF)'),
-        ('ohlcv_ok',      'OHLCV 데이터 (get_etf_ohlcv_by_ticker)'),
-        ('ohlcv_date_ok', '개별 가격 (get_etf_ohlcv_by_date)'),
+        ('tickers_ok',    'ETF 전종목 조회 (네이버 금융)'),
+        ('price_ok',      'ETF 가격 조회 (네이버 차트 API)'),
+        ('kospi_ok',      'KOSPI 지수 (네이버 차트 API)'),
+        ('holdings_ok',   '구성종목 PDF (KRX 직접 HTTP)'),
+        ('listing_ok',    '설정일 (네이버 금융)'),
     ]
     for key, label in checks:
         ok = results.get(key, False)
