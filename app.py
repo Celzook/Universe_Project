@@ -9,7 +9,7 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import threading, gc, traceback
+import gc, traceback
 
 st.set_page_config(page_title="ETF Universe Explorer", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
@@ -155,19 +155,20 @@ def run_universe_build(min_cap, top_n):
     start_global_collection()
 
 def start_global_collection():
+    """글로벌 가격 수집 — 동기 실행 (Streamlit rerun 호환)"""
     if st.session_state.global_loaded or st.session_state.global_loading:
         return
     st.session_state.global_loading = True
-    def _collect():
-        try:
+    try:
+        with st.spinner("🌍 글로벌 가격 수집 중... (약 30초~1분)"):
             result = cached_global_prices()
             st.session_state.global_data = result
             st.session_state.global_loaded = True
             st.session_state.show_global_toast = True
-        except Exception: pass
-        finally:
-            st.session_state.global_loading = False
-    threading.Thread(target=_collect, daemon=True).start()
+    except Exception as e:
+        st.warning(f"글로벌 가격 수집 실패: {e}")
+    finally:
+        st.session_state.global_loading = False
 
 
 # ============================================================================
