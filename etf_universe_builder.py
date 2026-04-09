@@ -556,7 +556,7 @@ def _fetch_prices_bulk(tickers, start_date, base_date):
 
     def fetch(d):
         try:
-            r = stock.get_etf_price_by_ticker(d)
+            r = stock.get_etf_ohlcv_by_ticker(d)
             time.sleep(Config.API_DELAY)
             if r is not None and not r.empty:
                 # 종가 컬럼 찾기 (다양한 이름 대응)
@@ -1156,6 +1156,117 @@ def step5_save(df, df_close, df_pdf, base_date):
         print(f"  {i:>3}. [{idx}] {nm:<26} {cap} {c1:<8} {c2:<12} YTD:{ytd:>8} BM:{bm:>8} #{rnk:<4} {top1}")
 
     return df_export
+
+
+# ============================================================================
+# 진단 함수 — Streamlit 앱에서 호출하여 문제 파악
+# ============================================================================
+def diagnose():
+    """KRX API 연결 및 데이터 수집 단계별 진단"""
+    results = {}
+
+    # 1. 영업일 찾기
+    print("=== [진단 1] 영업일 찾기 ===")
+    try:
+        base_date = find_latest_business_date()
+        results['base_date'] = base_date
+        results['base_date_ok'] = True
+        print(f"  ✅ 영업일: {base_date}")
+    except Exception as e:
+        results['base_date'] = str(e)
+        results['base_date_ok'] = False
+        print(f"  ❌ 실패: {e}")
+        return results
+
+    # 2. ETF 티커 목록
+    print("\n=== [진단 2] ETF 티커 목록 ===")
+    try:
+        tickers = _get_etf_tickers(base_date)
+        results['tickers_count'] = len(tickers)
+        results['tickers_ok'] = len(tickers) > 0
+        results['tickers_sample'] = tickers[:5] if tickers else []
+        print(f"  ✅ {len(tickers)}개 (샘플: {tickers[:5]})")
+    except Exception as e:
+        results['tickers_count'] = 0
+        results['tickers_ok'] = False
+        results['tickers_error'] = str(e)
+        print(f"  ❌ 실패: {e}")
+        return results
+
+    # 3. ETF 이름 조회 (1개만)
+    print("\n=== [진단 3] ETF 이름 조회 ===")
+    try:
+        test_ticker = tickers[0]
+        name = _get_etf_name(test_ticker)
+        results['name_test'] = f"{test_ticker} → {name}"
+        results['name_ok'] = name not in [None, '', 'N/A']
+        print(f"  ✅ {test_ticker} → {name}")
+    except Exception as e:
+        results['name_ok'] = False
+        results['name_error'] = str(e)
+        print(f"  ❌ 실패: {e}")
+
+    # 4. KRX 전종목시세_ETF (시가총액 소스)
+    print("\n=== [진단 4] KRX 전종목시세_ETF (시가총액) ===")
+    try:
+        from pykrx.website import krx
+        raw = krx.전종목시세_ETF().fetch(base_date)
+        if raw is not None and not raw.empty:
+            results['mktcap_rows'] = len(raw)
+            results['mktcap_cols'] = raw.columns.tolist()
+            results['mktcap_ok'] = 'MKTCAP' in raw.columns
+            results['mktcap_sample'] = raw.head(3).to_dict() if len(raw) > 0 else {}
+            print(f"  ✅ {len(raw)}행, MKTCAP 컬럼: {'MKTCAP' in raw.columns}")
+            print(f"  컬럼: {raw.columns.tolist()}")
+        else:
+            results['mktcap_ok'] = False
+            results['mktcap_rows'] = 0
+            print(f"  ❌ 빈 결과")
+    except Exception as e:
+        results['mktcap_ok'] = False
+        results['mktcap_error'] = str(e)
+        print(f"  ❌ 실패: {e}")
+        import traceback; traceback.print_exc()
+
+    # 5. get_etf_ohlcv_by_ticker (가격 소스)
+    print("\n=== [진단 5] get_etf_ohlcv_by_ticker ===")
+    try:
+        df_ohlcv = stock.get_etf_ohlcv_by_ticker(base_date)
+        results['ohlcv_rows'] = len(df_ohlcv) if df_ohlcv is not None else 0
+        results['ohlcv_ok'] = df_ohlcv is not None and not df_ohlcv.empty
+        if results['ohlcv_ok']:
+            results['ohlcv_cols'] = df_ohlcv.columns.tolist()
+            print(f"  ✅ {len(df_ohlcv)}행, 컬럼: {df_ohlcv.columns.tolist()}")
+        else:
+            print(f"  ❌ 빈 결과")
+    except Exception as e:
+        results['ohlcv_ok'] = False
+        results['ohlcv_error'] = str(e)
+        print(f"  ❌ 실패: {e}")
+
+    # 6. get_etf_ohlcv_by_date (개별 종가 소스)
+    print("\n=== [진단 6] get_etf_ohlcv_by_date (069500) ===")
+    try:
+        start_test = (datetime.strptime(base_date, "%Y%m%d") - timedelta(days=7)).strftime("%Y%m%d")
+        df_test = stock.get_etf_ohlcv_by_date(start_test, base_date, "069500")
+        results['ohlcv_date_ok'] = df_test is not None and not df_test.empty
+        if results['ohlcv_date_ok']:
+            print(f"  ✅ {len(df_test)}일, 컬럼: {df_test.columns.tolist()}")
+        else:
+            print(f"  ❌ 빈 결과")
+    except Exception as e:
+        results['ohlcv_date_ok'] = False
+        results['ohlcv_date_error'] = str(e)
+        print(f"  ❌ 실패: {e}")
+
+    # 종합
+    all_ok = all(results.get(k, False) for k in
+                 ['base_date_ok','tickers_ok','name_ok','mktcap_ok','ohlcv_ok','ohlcv_date_ok'])
+    results['all_ok'] = all_ok
+    print(f"\n{'='*60}")
+    print(f"  종합: {'✅ 전체 정상' if all_ok else '❌ 일부 실패 — 위 결과 확인'}")
+    print(f"{'='*60}")
+    return results
 
 
 # ============================================================================
