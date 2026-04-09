@@ -334,46 +334,55 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
     cap_series = pd.Series(dtype=float, name='시가총액')
     nav_series = pd.Series(dtype=float, name='NAV')
 
-    # 방법 1: get_etf_price_by_ticker (ETF 전용)
-    print("  → [1차] get_etf_price_by_ticker...")
+    # 방법 1: KRX 전종목시세_ETF raw API (시가총액 + NAV + 종가 + 거래량 일괄 수집)
+    print("  → [1차] KRX 전종목시세_ETF raw API...")
     try:
-        df_etf = stock.get_etf_price_by_ticker(base_date)
-        print(f"    컬럼: {df_etf.columns.tolist()}")
-        print(f"    행 수: {len(df_etf)}, 샘플 인덱스: {df_etf.index[:3].tolist()}")
-
-        # 시가총액 컬럼 찾기 (다양한 이름)
-        for c in df_etf.columns:
-            cl = str(c).replace(' ','')
-            if '시가총액' in cl or '시총' in cl:
-                cap_series = df_etf[c]; print(f"    ✅ 시총 컬럼: '{c}'"); break
-            if '순자산' in cl or 'NAV' in cl.upper():
-                nav_series = df_etf[c]; print(f"    ✅ NAV 컬럼: '{c}'")
-
-        # 종가/거래량도 여기서 가져올 수 있음
-        for c in df_etf.columns:
-            if '종가' in str(c) and '종가' not in df.columns:
-                df = df.join(df_etf[[c]], how='left')
-            if '거래량' in str(c) and '거래량' not in df.columns:
-                df = df.join(df_etf[[c]], how='left')
+        from pykrx.website import krx
+        raw = krx.전종목시세_ETF().fetch(base_date)
+        if raw is not None and not raw.empty:
+            print(f"    raw 행: {len(raw)}, 컬럼: {raw.columns.tolist()[:8]}...")
+            # 티커를 인덱스로
+            if 'ISU_SRT_CD' in raw.columns:
+                raw = raw.set_index('ISU_SRT_CD')
+            # 쉼표 제거 후 숫자 변환
+            def _to_num(s):
+                return pd.to_numeric(str(s).replace(',', ''), errors='coerce')
+            if 'MKTCAP' in raw.columns:
+                cap_series = raw['MKTCAP'].apply(_to_num)
+                print(f"    ✅ 시총 확보: {cap_series.notna().sum()}개")
+            if 'INVSTASST_NETASST_TOTAMT' in raw.columns:
+                nav_series = raw['INVSTASST_NETASST_TOTAMT'].apply(_to_num)
+                print(f"    ✅ NAV 확보: {nav_series.notna().sum()}개")
+            # 종가/거래량도 가져오기
+            if 'TDD_CLSPRC' in raw.columns and '종가' not in df.columns:
+                df['종가'] = raw['TDD_CLSPRC'].apply(_to_num)
+            if 'ACC_TRDVOL' in raw.columns and '거래량' not in df.columns:
+                df['거래량'] = raw['ACC_TRDVOL'].apply(_to_num)
+        else:
+            print(f"    ⚠️ raw 결과 비어있음")
     except Exception as e:
         print(f"    ⚠️ 실패: {e}")
+        import traceback; traceback.print_exc()
 
-    # 방법 2: get_market_cap_by_ticker (주식 시총 — ETF도 포함될 수 있음)
+    # 방법 2: get_etf_ohlcv_by_ticker (NAV는 있지만 시총은 없음 — fallback)
     if cap_series.empty or cap_series.isna().all():
-        print("  → [2차] get_market_cap_by_ticker...")
+        print("  → [2차] get_etf_ohlcv_by_ticker...")
         try:
-            df_mc = stock.get_market_cap_by_ticker(base_date)
-            print(f"    컬럼: {df_mc.columns.tolist()}, 행: {len(df_mc)}")
-            # ETF 인덱스와 겹치는지 확인
-            overlap = set(df.index) & set(df_mc.index)
-            print(f"    ETF와 겹치는 티커: {len(overlap)}개")
-            if len(overlap) > 0 and '시가총액' in df_mc.columns:
-                cap_series = df_mc['시가총액']
-                print(f"    ✅ 시총 확보: {cap_series.notna().sum()}개")
+            df_etf = stock.get_etf_ohlcv_by_ticker(base_date)
+            if not df_etf.empty:
+                print(f"    컬럼: {df_etf.columns.tolist()}, 행: {len(df_etf)}")
+                # ohlcv에는 시가총액이 없으므로, 종가 × 상장주식수 추정 불가
+                # 대신 get_market_cap_by_ticker 시도
+                df_mc = stock.get_market_cap_by_ticker(base_date)
+                overlap = set(df.index) & set(df_mc.index)
+                print(f"    ETF와 겹치는 티커: {len(overlap)}개")
+                if len(overlap) > 0 and '시가총액' in df_mc.columns:
+                    cap_series = df_mc['시가총액']
+                    print(f"    ✅ 시총 확보: {cap_series.notna().sum()}개")
         except Exception as e:
             print(f"    ⚠️ 실패: {e}")
 
-    # 방법 3: 개별 ETF (느리지만 확실)
+    # 방법 3: 개별 ETF (느리지만 확실 — 최후 수단)
     if cap_series.empty or cap_series.isna().all():
         print("  → [3차] 개별 ETF 시총 수집...")
         cap_data = {}
