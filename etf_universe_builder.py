@@ -403,9 +403,15 @@ def krx_get_etf_holdings(ticker, base_date):
     }
 
     try:
-        text = _http_post(url, data=params, timeout=15)
+        text = _http_post(url, data=params, timeout=25)
         data = json.loads(text)
         items_raw = data.get('output', [])
+        if not items_raw:
+            # 1회 재시도
+            time.sleep(1)
+            text = _http_post(url, data=params, timeout=25)
+            data = json.loads(text)
+            items_raw = data.get('output', [])
         if not items_raw:
             return []
 
@@ -631,11 +637,12 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
     before = len(df)
 
     # 캐시 확인
-    cache_name = f"mktcap_v4_{base_date}.pkl"
+    cache_name = f"mktcap_v5_{base_date}.pkl"
     cached = _load_cache(cache_name)
     if cached is not None and '시가총액(억원)' in cached.columns:
         print(f"  → 💾 시총 캐시 로드: {len(cached)}개")
-        df = df.join(cached[['시가총액(억원)', 'NAV(억원)']].dropna(how='all'), how='left')
+        join_cols = [c for c in ['시가총액(억원)', 'NAV(억원)', '종가', '거래량'] if c in cached.columns]
+        df = df.join(cached[join_cols].dropna(how='all'), how='left')
         df = df[df['시가총액(억원)'].notna() & (df['시가총액(억원)'] >= min_cap)].copy()
         df['시가총액(억원)'] = df['시가총액(억원)'].astype(int)
         print(f"  → {before}개 → {len(df)}개")
@@ -663,10 +670,11 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
             if not df.empty:
                 print(f"  → 시가총액 범위: {df['시가총액(억원)'].min():,} ~ {df['시가총액(억원)'].max():,}억원")
 
-            # 캐시 저장
+            # 캐시 저장 (종가/거래량도 포함)
             cache_df = df[['시가총액(억원)']].copy()
-            if 'NAV(억원)' in df.columns:
-                cache_df['NAV(억원)'] = df['NAV(억원)']
+            for extra_col in ['NAV(억원)', '종가', '거래량']:
+                if extra_col in df.columns:
+                    cache_df[extra_col] = df[extra_col]
             _save_cache(cache_name, cache_df)
         else:
             print("  ⚠️ 시가총액 컬럼 없음 — 필터 건너뜀")
@@ -912,7 +920,7 @@ def _collect_pdf_holdings(df, tickers, base_date):
     """구성종목 수집 → 피벗 매트릭스 df_pdf 반환"""
     print(f"\n  ── 4-C: 구성종목 Top {Config.TOP_N_HOLDINGS} 수집 (KRX 직접) ──")
 
-    cache_file = os.path.join(Config.CACHE_DIR, f"holdings_v5_{base_date}.pkl")
+    cache_file = os.path.join(Config.CACHE_DIR, f"holdings_v6_{base_date}.pkl")
     cached = {}
     if Config.USE_CACHE and os.path.exists(cache_file):
         try:
@@ -1028,30 +1036,100 @@ def _krx_holdings_batch(tickers, base_date):
 
 
 def _naver_etf_holdings(ticker):
-    """네이버 ETF 상세 페이지에서 구성종목 스크래핑 (KRX fallback)"""
+    """네이버 ETF 구성종목 스크래핑 — 여러 방법 시도 (KRX fallback)"""
+
+    # 방법 1: 네이버 증권 API (JSON) — 가장 안정적
+    try:
+        url = f"https://m.stock.naver.com/api/stock/{ticker}/etf/portfolio"
+        hdr = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
+               'Referer': f'https://m.stock.naver.com/domestic/stock/{ticker}/etf'}
+        if HAS_REQUESTS:
+            resp = _requests_lib.get(url, headers=hdr, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = []
+                # 구성종목 리스트 추출
+                port = data if isinstance(data, list) else data.get('portfolio', data.get('result', []))
+                if isinstance(port, dict):
+                    port = port.get('etfMajorHoldingList', port.get('stocks', port.get('items', [])))
+                if isinstance(port, list):
+                    for item in port:
+                        name = (item.get('stockName', '') or item.get('itemname', '')
+                                or item.get('name', '') or item.get('ISU_NM', '')).strip()
+                        weight = 0
+                        for wk in ['weightedValue', 'weight', 'ratio', 'COMPST_RTO', 'proportion']:
+                            wv = item.get(wk)
+                            if wv is not None:
+                                try:
+                                    weight = float(str(wv).replace(',', '').replace('%', ''))
+                                    break
+                                except (ValueError, TypeError):
+                                    continue
+                        if weight > 0 and name:
+                            items.append((name[:20], round(weight, 2)))
+                if items:
+                    items.sort(key=lambda x: x[1], reverse=True)
+                    return items[:Config.TOP_N_HOLDINGS]
+    except Exception:
+        pass
+
+    # 방법 2: 네이버 금융 ETF 상세 페이지 HTML 파싱 (pandas.read_html)
+    try:
+        url = f"https://finance.naver.com/item/etfinfo.naver?code={ticker}"
+        html = _http_get(url, timeout=10)
+        # pandas.read_html로 모든 테이블 파싱
+        tables = pd.read_html(html, encoding='utf-8')
+        for tbl in tables:
+            cols = tbl.columns.tolist()
+            # 종목명 + 비중(%) 패턴 찾기
+            name_col = None
+            weight_col = None
+            for c in cols:
+                cs = str(c)
+                if any(kw in cs for kw in ['종목명', '종목', '구성종목', '보유종목']):
+                    name_col = c
+                if any(kw in cs for kw in ['비중', '비율', '%', '편입비']):
+                    weight_col = c
+            if name_col and weight_col:
+                items = []
+                for _, row in tbl.iterrows():
+                    nm = str(row[name_col]).strip()
+                    try:
+                        w = float(str(row[weight_col]).replace(',', '').replace('%', ''))
+                    except (ValueError, TypeError):
+                        continue
+                    if w > 0 and nm and nm != 'nan':
+                        items.append((nm[:20], round(w, 2)))
+                if items:
+                    items.sort(key=lambda x: x[1], reverse=True)
+                    return items[:Config.TOP_N_HOLDINGS]
+    except Exception:
+        pass
+
+    # 방법 3: 네이버 금융 iframe 구성종목 페이지
     try:
         url = f"https://finance.naver.com/item/coinfo.naver?code={ticker}&target=finsum_main"
-        html = _http_get(url)
-        # 구성종목 테이블 파싱 시도
+        html = _http_get(url, timeout=10)
         items = []
-        # 네이버 ETF 포트폴리오 API 시도
-        url2 = f"https://finance.naver.com/item/etfinfo.naver?code={ticker}"
-        raw = _http_get(url2)
-        # 종목명과 비중 추출 패턴
-        # <td class="tit"><a ...>종목명</a></td><td class="num">비중%</td>
-        pattern = r'<a[^>]*title="([^"]+)"[^>]*>.*?</a>.*?<td[^>]*class="num"[^>]*>([\d.]+)'
-        for m in re.finditer(pattern, raw, re.DOTALL):
+        # title 속성과 숫자 비중 추출
+        for m in re.finditer(
+            r'title="([^"]{2,30})"[^>]*>[^<]*</a>\s*</td>\s*<td[^>]*>\s*([\d,.]+)',
+            html, re.DOTALL
+        ):
             name = m.group(1).strip()[:20]
             try:
-                weight = float(m.group(2))
+                weight = float(m.group(2).replace(',', ''))
                 if weight > 0 and name:
                     items.append((name, round(weight, 2)))
             except (ValueError, TypeError):
                 continue
-        items.sort(key=lambda x: x[1], reverse=True)
-        return items[:Config.TOP_N_HOLDINGS]
+        if items:
+            items.sort(key=lambda x: x[1], reverse=True)
+            return items[:Config.TOP_N_HOLDINGS]
     except Exception:
-        return []
+        pass
+
+    return []
 
 
 # ──────────────────────────────────────────────────────────
@@ -1421,16 +1499,47 @@ def diagnose():
         if isin:
             holdings = krx_get_etf_holdings("069500", base_date)
             results['holdings_ok'] = len(holdings) > 0
-            print(f"  ✅ 구성종목: {len(holdings)}개")
-            for name, w in holdings[:5]:
-                print(f"    - {name}: {w}%")
+            if holdings:
+                print(f"  ✅ KRX 구성종목: {len(holdings)}개")
+                for name, w in holdings[:5]:
+                    print(f"    - {name}: {w}%")
+            else:
+                print(f"  ⚠️ KRX 빈 결과 → 네이버 fallback 시도...")
+                naver_holdings = _naver_etf_holdings("069500")
+                if naver_holdings:
+                    results['holdings_ok'] = True
+                    results['holdings_source'] = 'naver_fallback'
+                    print(f"  ✅ 네이버 fallback 성공: {len(naver_holdings)}개")
+                    for name, w in naver_holdings[:5]:
+                        print(f"    - {name}: {w}%")
+                else:
+                    print(f"  ❌ 네이버 fallback도 실패")
         else:
-            results['holdings_ok'] = False
-            print(f"  ❌ ISIN 조회 실패")
+            # KRX ISIN 실패 → 네이버 fallback
+            print(f"  ⚠️ ISIN 조회 실패 → 네이버 fallback 시도...")
+            naver_holdings = _naver_etf_holdings("069500")
+            if naver_holdings:
+                results['holdings_ok'] = True
+                results['holdings_source'] = 'naver_fallback'
+                print(f"  ✅ 네이버 fallback 성공: {len(naver_holdings)}개")
+                for name, w in naver_holdings[:5]:
+                    print(f"    - {name}: {w}%")
+            else:
+                results['holdings_ok'] = False
+                print(f"  ❌ KRX + 네이버 모두 실패")
     except Exception as e:
         results['holdings_ok'] = False
         results['holdings_error'] = str(e)
         print(f"  ❌ 실패: {e}")
+        # 예외 발생 시에도 네이버 fallback 시도
+        try:
+            naver_holdings = _naver_etf_holdings("069500")
+            if naver_holdings:
+                results['holdings_ok'] = True
+                results['holdings_source'] = 'naver_fallback'
+                print(f"  ✅ 네이버 fallback 성공: {len(naver_holdings)}개")
+        except Exception:
+            pass
 
     print("\n=== [진단 6] 네이버 설정일 (069500) ===")
     try:
