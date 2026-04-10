@@ -1,6 +1,6 @@
 """
 ==============================================================================
- 한국 상장 ETF Managed Portfolio 유니버스 빌더 v6.0
+ 한국 상장 ETF Managed Portfolio 유니버스 빌더 v6.1
 ==============================================================================
  [pykrx 완전 제거 → 네이버 금융 + KRX 직접 HTTP]
 
@@ -75,8 +75,11 @@ class Config:
 _NAVER_ETF_CACHE = {}   # 메모리 캐시: {date_key: DataFrame}
 
 
-def _http_get(url, headers=None, timeout=10, encoding='utf-8'):
-    """범용 HTTP GET — requests 우선, urllib fallback"""
+def _http_get(url, headers=None, timeout=10, encoding=None):
+    """범용 HTTP GET — requests 우선, urllib fallback
+    encoding=None: 자동 감지 (네이버 금융은 EUC-KR, 차트 API는 UTF-8)
+    encoding='euc-kr' 등 명시 시: 해당 인코딩 사용
+    """
     hdr = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                           'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
     if headers:
@@ -86,12 +89,37 @@ def _http_get(url, headers=None, timeout=10, encoding='utf-8'):
         resp.raise_for_status()
         if encoding:
             resp.encoding = encoding
+        else:
+            # 응답 헤더 charset 우선 → apparent_encoding → euc-kr/utf-8 시도
+            ct = resp.headers.get('Content-Type', '')
+            if 'charset=' in ct.lower():
+                # 헤더에 charset 명시된 경우 그대로 사용
+                resp.encoding = resp.encoding  # requests가 이미 파싱함
+            elif resp.apparent_encoding and resp.apparent_encoding.lower() not in ('ascii', 'windows-1252'):
+                resp.encoding = resp.apparent_encoding
+            else:
+                # 네이버 금융 도메인은 대부분 EUC-KR
+                if 'naver.com' in url and 'fchart' not in url:
+                    resp.encoding = 'euc-kr'
+                else:
+                    resp.encoding = 'utf-8'
         return resp.text
     else:
         req = Request(url, headers=hdr)
         with urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
-            return raw.decode(encoding, errors='ignore')
+            if encoding:
+                return raw.decode(encoding, errors='ignore')
+            # 자동 감지: euc-kr 먼저 시도 (네이버), 실패 시 utf-8
+            if 'naver.com' in url and 'fchart' not in url:
+                try:
+                    return raw.decode('euc-kr')
+                except (UnicodeDecodeError, LookupError):
+                    pass
+            try:
+                return raw.decode('utf-8')
+            except (UnicodeDecodeError, LookupError):
+                return raw.decode('euc-kr', errors='ignore')
 
 
 def _http_post(url, data, headers=None, timeout=10):
@@ -215,68 +243,111 @@ def naver_get_price_history(ticker, start_date, end_date):
            f"?symbol={ticker}&requestType=1"
            f"&startTime={start_date}&endTime={end_date}&timeframe=day")
     try:
-        text = _http_get(url)
+        text = _http_get(url, encoding='utf-8')
         return _parse_naver_chart(text)
     except Exception:
         return pd.Series(dtype=float)
 
 
 def naver_get_index_history(symbol, start_date, end_date):
-    """네이버 차트 API → 지수 일별 종가 Series (KOSPI, KOSDAQ 등)"""
-    url = (f"https://fchart.stock.naver.com/siseJson.naver"
-           f"?symbol={symbol}&requestType=2"
-           f"&startTime={start_date}&endTime={end_date}&timeframe=day")
-    try:
-        text = _http_get(url)
-        return _parse_naver_chart(text)
-    except Exception:
-        return pd.Series(dtype=float)
+    """네이버 차트 API → 지수 일별 종가 Series (KOSPI, KOSDAQ 등)
+    KOSPI는 심볼 'KOSPI' 또는 'KPI200' 등을 시도
+    """
+    # 심볼 매핑: 네이버 차트 API에서 사용하는 심볼
+    symbol_candidates = [symbol]
+    if symbol.upper() == 'KOSPI':
+        symbol_candidates = ['KOSPI', 'KPI200']
+    elif symbol.upper() == 'KOSDAQ':
+        symbol_candidates = ['KOSDAQ', 'KQI150']
+
+    for sym in symbol_candidates:
+        url = (f"https://fchart.stock.naver.com/siseJson.naver"
+               f"?symbol={sym}&requestType=2"
+               f"&startTime={start_date}&endTime={end_date}&timeframe=day")
+        try:
+            text = _http_get(url, encoding='utf-8')
+            result = _parse_naver_chart(text)
+            if not result.empty:
+                return result
+        except Exception:
+            continue
+    return pd.Series(dtype=float)
 
 
 def _parse_naver_chart(text):
-    """네이버 차트 API 응답 파싱 → 종가 Series"""
-    text = text.strip().replace("'", '"')
+    """네이버 차트 API 응답 파싱 → 종가 Series
+    응답 형식: [["날짜",시가,고가,저가,종가,거래량], ...]
+    날짜에 공백/따옴표가 포함될 수 있음
+    """
+    text = text.strip()
     rows = []
 
-    # 줄 단위 파싱
-    for line in text.split('\n'):
-        line = line.strip().rstrip(',')
-        if not line or line in ['[', ']']:
-            continue
-        # 헤더 행 스킵
-        if '날짜' in line or 'date' in line.lower():
-            continue
-        try:
-            row = json.loads(line)
+    # 방법 1: 전체 JSON 배열 파싱 (가장 신뢰도 높음)
+    try:
+        # 작은따옴표 → 큰따옴표, 후행 콤마 제거
+        cleaned = text.replace("'", '"')
+        # 후행 콤마 처리: ],] → ]] 패턴
+        cleaned = re.sub(r',\s*\]', ']', cleaned)
+        data = json.loads(cleaned)
+        for row in data:
             if isinstance(row, list) and len(row) >= 5:
-                date_str = str(row[0]).strip().strip('"')
-                if date_str.isdigit() and len(date_str) == 8:
-                    rows.append({
-                        'date': pd.Timestamp(date_str),
-                        'close': float(row[4])
-                    })
-        except (json.JSONDecodeError, ValueError):
-            continue
-
-    # 전체 JSON 배열 파싱 시도
-    if not rows:
-        try:
-            data = json.loads(text)
-            for row in data:
-                if isinstance(row, list) and len(row) >= 5:
-                    date_str = str(row[0]).strip().strip('"')
-                    if date_str.isdigit() and len(date_str) == 8:
+                date_str = str(row[0]).strip().strip('"').strip()
+                # 날짜 문자열에서 숫자만 추출
+                digits = re.sub(r'\D', '', date_str)
+                if len(digits) == 8:
+                    try:
+                        close_val = float(row[4])
                         rows.append({
-                            'date': pd.Timestamp(date_str),
+                            'date': pd.Timestamp(digits),
+                            'close': close_val
+                        })
+                    except (ValueError, TypeError):
+                        continue
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 방법 2: 줄 단위 파싱 (JSON 전체 파싱 실패 시)
+    if not rows:
+        for line in text.split('\n'):
+            line = line.strip().rstrip(',')
+            if not line or line in ('[', ']', '[[', ']]'):
+                continue
+            # 헤더 행 스킵 (날짜/date 문자열 포함 행)
+            if '날짜' in line or 'date' in line.lower():
+                continue
+            try:
+                # 작은따옴표 → 큰따옴표
+                line = line.replace("'", '"')
+                row = json.loads(line)
+                if isinstance(row, list) and len(row) >= 5:
+                    date_str = str(row[0]).strip().strip('"').strip()
+                    digits = re.sub(r'\D', '', date_str)
+                    if len(digits) == 8:
+                        rows.append({
+                            'date': pd.Timestamp(digits),
                             'close': float(row[4])
                         })
-        except Exception:
-            pass
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+    # 방법 3: 정규식으로 직접 추출 (최후 수단)
+    if not rows:
+        pattern = r'\[?\s*["\']?(\d{8})\s*["\']?\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)'
+        for m in re.finditer(pattern, text):
+            try:
+                rows.append({
+                    'date': pd.Timestamp(m.group(1)),
+                    'close': float(m.group(5))
+                })
+            except (ValueError, TypeError):
+                continue
 
     if not rows:
         return pd.Series(dtype=float)
 
     df = pd.DataFrame(rows).set_index('date').sort_index()
+    # 중복 날짜 제거
+    df = df[~df.index.duplicated(keep='first')]
     return df['close']
 
 
@@ -560,7 +631,7 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
     before = len(df)
 
     # 캐시 확인
-    cache_name = f"mktcap_v3_{base_date}.pkl"
+    cache_name = f"mktcap_v4_{base_date}.pkl"
     cached = _load_cache(cache_name)
     if cached is not None and '시가총액(억원)' in cached.columns:
         print(f"  → 💾 시총 캐시 로드: {len(cached)}개")
@@ -669,7 +740,7 @@ def _collect_prices(df, tickers, base_date):
         kospi = pd.Series(dtype=float)
 
     # 캐시
-    cache_file = os.path.join(Config.CACHE_DIR, f"price_v6_{base_date}.pkl")
+    cache_file = os.path.join(Config.CACHE_DIR, f"price_v7_{base_date}.pkl")
     if Config.USE_CACHE and os.path.exists(cache_file):
         try:
             with open(cache_file, 'rb') as f:
@@ -736,7 +807,7 @@ def _fetch_prices_naver(tickers, start_date, end_date):
 def _collect_listing_dates(df, tickers, base_date):
     print("\n  ── 4-B: 설정일 수집 (네이버 금융) ──")
 
-    cache_file = os.path.join(Config.CACHE_DIR, "listing_dates_v4.pkl")
+    cache_file = os.path.join(Config.CACHE_DIR, "listing_dates_v5.pkl")
     cached = {}
     if Config.USE_CACHE and os.path.exists(cache_file):
         try:
@@ -768,17 +839,58 @@ def _naver_listing_dates(tickers):
     results = {}
 
     def fetch(ticker):
+        # 방법 1: 네이버 ETF 상세 페이지 스크래핑
         try:
             url = f"https://finance.naver.com/item/main.naver?code={ticker}"
             req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            html = urlopen(req, timeout=5).read().decode('euc-kr', errors='ignore')
-            m = re.search(r'설정일.*?(\d{4}\.\d{2}\.\d{2})', html, re.DOTALL)
-            if not m:
-                m = re.search(r'상장일.*?(\d{4}\.\d{2}\.\d{2})', html, re.DOTALL)
-            if m:
-                return ticker, m.group(1).replace('.', '-')
+            raw = urlopen(req, timeout=5).read()
+            # EUC-KR 디코딩 (네이버 금융 페이지는 EUC-KR)
+            try:
+                html = raw.decode('euc-kr')
+            except (UnicodeDecodeError, LookupError):
+                html = raw.decode('utf-8', errors='ignore')
+
+            # 다양한 패턴 시도 (페이지 구조 변경 대응)
+            patterns = [
+                r'설정일\s*</th>\s*<td[^>]*>\s*(\d{4}\.\d{2}\.\d{2})',    # <th>설정일</th><td>2020.01.01
+                r'설정일\s*</td>\s*<td[^>]*>\s*(\d{4}\.\d{2}\.\d{2})',    # <td>설정일</td><td>
+                r'설정일.*?(\d{4}\.\d{2}\.\d{2})',                         # 기존 패턴
+                r'상장일\s*</th>\s*<td[^>]*>\s*(\d{4}\.\d{2}\.\d{2})',    # 상장일 패턴
+                r'상장일.*?(\d{4}\.\d{2}\.\d{2})',
+                r'설정일\s*:?\s*(\d{4}[-./]\d{2}[-./]\d{2})',             # 설정일: YYYY-MM-DD
+                r'상장일\s*:?\s*(\d{4}[-./]\d{2}[-./]\d{2})',
+                r'(?:설정|상장)\s*\d*\s*일?\s*(\d{4}\.\d{2}\.\d{2})',     # 설정 일, 상장 일
+                r'listing_date.*?(\d{4}\.\d{2}\.\d{2})',                   # 영문 키
+                r'list_dt.*?(\d{4}\.\d{2}\.\d{2})',
+            ]
+            for pat in patterns:
+                m = re.search(pat, html, re.DOTALL | re.IGNORECASE)
+                if m:
+                    date_str = m.group(1).replace('/', '.').replace('-', '.')
+                    # 날짜 유효성 검증
+                    try:
+                        dt = datetime.strptime(date_str, '%Y.%m.%d')
+                        if 1990 <= dt.year <= 2030:
+                            return ticker, date_str.replace('.', '-')
+                    except ValueError:
+                        continue
         except Exception:
             pass
+
+        # 방법 2: 네이버 ETF API에서 설정일 시도
+        try:
+            url = f"https://finance.naver.com/api/sise/etfItemList.nhn?etfType=0&targetColumn=market_sum&sortOrder=desc"
+            text = _http_get(url)
+            data = json.loads(text)
+            items = data.get('result', {}).get('etfItemList', [])
+            for item in items:
+                if str(item.get('itemcode', '')).strip() == ticker:
+                    list_date = item.get('listDt', '') or item.get('list_dt', '')
+                    if list_date and re.match(r'\d{4}[./-]\d{2}[./-]\d{2}', str(list_date)):
+                        return ticker, str(list_date).replace('.', '-').replace('/', '-')
+        except Exception:
+            pass
+
         return ticker, ''
 
     with ThreadPoolExecutor(max_workers=Config.MAX_WORKERS) as exe:
@@ -800,7 +912,7 @@ def _collect_pdf_holdings(df, tickers, base_date):
     """구성종목 수집 → 피벗 매트릭스 df_pdf 반환"""
     print(f"\n  ── 4-C: 구성종목 Top {Config.TOP_N_HOLDINGS} 수집 (KRX 직접) ──")
 
-    cache_file = os.path.join(Config.CACHE_DIR, f"holdings_v4_{base_date}.pkl")
+    cache_file = os.path.join(Config.CACHE_DIR, f"holdings_v5_{base_date}.pkl")
     cached = {}
     if Config.USE_CACHE and os.path.exists(cache_file):
         try:
@@ -858,7 +970,7 @@ def _collect_pdf_holdings(df, tickers, base_date):
 
 
 def _krx_holdings_batch(tickers, base_date):
-    """KRX 직접 HTTP로 구성종목 배치 수집"""
+    """KRX 직접 HTTP로 구성종목 배치 수집 (실패 시 네이버 fallback)"""
     results = {}
 
     # ETF 티커 집합 (ETF-in-ETF 제외용)
@@ -870,17 +982,35 @@ def _krx_holdings_batch(tickers, base_date):
         pass
 
     def fetch(ticker):
+        # 1차: KRX 직접 HTTP
         try:
             items = krx_get_etf_holdings(ticker, base_date)
             time.sleep(Config.API_DELAY)
-            filtered = []
-            for name, w in items:
-                if name.isdigit() and len(name) == 6 and name in etf_set:
-                    continue
-                filtered.append((name, w))
-            return ticker, filtered[:Config.TOP_N_HOLDINGS]
+            if items:
+                filtered = []
+                for name, w in items:
+                    if name.isdigit() and len(name) == 6 and name in etf_set:
+                        continue
+                    filtered.append((name, w))
+                if filtered:
+                    return ticker, filtered[:Config.TOP_N_HOLDINGS]
         except Exception:
             pass
+
+        # 2차: 네이버 ETF 상세 페이지에서 구성종목 스크래핑 (fallback)
+        try:
+            items = _naver_etf_holdings(ticker)
+            if items:
+                filtered = []
+                for name, w in items:
+                    if name.isdigit() and len(name) == 6 and name in etf_set:
+                        continue
+                    filtered.append((name, w))
+                if filtered:
+                    return ticker, filtered[:Config.TOP_N_HOLDINGS]
+        except Exception:
+            pass
+
         return ticker, []
 
     # KRX에 너무 빠르게 요청하면 차단되므로 스레드 수 제한
@@ -893,8 +1023,35 @@ def _krx_holdings_batch(tickers, base_date):
                     results[t] = items
                 pbar.update(1)
 
-    print(f"  → KRX 성공: {len(results)}/{len(tickers)}")
+    print(f"  → KRX+네이버 성공: {len(results)}/{len(tickers)}")
     return results
+
+
+def _naver_etf_holdings(ticker):
+    """네이버 ETF 상세 페이지에서 구성종목 스크래핑 (KRX fallback)"""
+    try:
+        url = f"https://finance.naver.com/item/coinfo.naver?code={ticker}&target=finsum_main"
+        html = _http_get(url)
+        # 구성종목 테이블 파싱 시도
+        items = []
+        # 네이버 ETF 포트폴리오 API 시도
+        url2 = f"https://finance.naver.com/item/etfinfo.naver?code={ticker}"
+        raw = _http_get(url2)
+        # 종목명과 비중 추출 패턴
+        # <td class="tit"><a ...>종목명</a></td><td class="num">비중%</td>
+        pattern = r'<a[^>]*title="([^"]+)"[^>]*>.*?</a>.*?<td[^>]*class="num"[^>]*>([\d.]+)'
+        for m in re.finditer(pattern, raw, re.DOTALL):
+            name = m.group(1).strip()[:20]
+            try:
+                weight = float(m.group(2))
+                if weight > 0 and name:
+                    items.append((name, round(weight, 2)))
+            except (ValueError, TypeError):
+                continue
+        items.sort(key=lambda x: x[1], reverse=True)
+        return items[:Config.TOP_N_HOLDINGS]
+    except Exception:
+        return []
 
 
 # ──────────────────────────────────────────────────────────
@@ -998,10 +1155,10 @@ def _classify(df):
 
         if any(kw in u for kw in ['반도체','팹리스']): return '섹터/테마','반도체',''
         if any(kw in u for kw in ['2차전지','배터리','리튬','양극재','음극재']): return '섹터/테마','2차전지/배터리',''
-        if any(kw in u for kw in ['AI','인공지능']): return '섹터/테마','AI',''
-        if any(kw in u for kw in ['소프트웨어','SW','클라우드','SAAS']): return '섹터/테마','소프트웨어/클라우드',''
+        if any(kw in u for kw in ['AI','인공지능','AI반도체','AI밸류체인']): return '섹터/테마','AI',''
+        if any(kw in u for kw in ['소프트웨어','SW','클라우드','SAAS','데이터센터','IDC']): return '섹터/테마','소프트웨어/클라우드',''
         if any(kw in u for kw in ['게임','GAME']): return '섹터/테마','게임',''
-        if any(kw in u for kw in ['엔터','K-POP','KPOP','콘텐츠']): return '섹터/테마','엔터/콘텐츠',''
+        if any(kw in u for kw in ['엔터','K-POP','KPOP','콘텐츠','K-콘텐츠','K콘텐츠','미디어콘텐츠']): return '섹터/테마','엔터/콘텐츠',''
         if any(kw in u for kw in ['미디어','방송','광고']): return '섹터/테마','미디어',''
         if any(kw in u for kw in ['바이오','헬스케어','제약','의료기기','의료','헬스']): return '섹터/테마','바이오/헬스케어',''
         if any(kw in u for kw in ['자동차','전기차','EV','모빌리티','자율주행']): return '섹터/테마','자동차/모빌리티',''
@@ -1013,11 +1170,11 @@ def _classify(df):
         if any(kw in u for kw in ['건설','인프라','시멘트']): return '섹터/테마','건설/인프라',''
         if any(kw in u for kw in ['조선']): return '섹터/테마','조선',''
         if any(kw in u for kw in ['해운']): return '섹터/테마','해운',''
-        if any(kw in u for kw in ['방산','방위','우주항공','항공우주','우주']): return '섹터/테마','방산/우주항공',''
+        if any(kw in u for kw in ['방산','방위','우주항공','항공우주','우주','스페이스']): return '섹터/테마','방산/우주항공',''
         if any(kw in u for kw in ['화학','소재','신소재']): return '섹터/테마','화학/소재',''
         if any(kw in u for kw in ['철강','금속']): return '섹터/테마','철강/금속',''
         if any(kw in u for kw in ['에너지','석유']): return '섹터/테마','에너지',''
-        if any(kw in u for kw in ['유틸리티','전력','발전']): return '섹터/테마','유틸리티/전력',''
+        if any(kw in u for kw in ['유틸리티','전력','발전','전력인프라','전력설비','송전','변전']): return '섹터/테마','유틸리티/전력',''
         if any(kw in u for kw in ['필수소비재','음식료','식품','F&B']): return '섹터/테마','필수소비재/식품',''
         if any(kw in u for kw in ['경기소비재','럭셔리','화장품','뷰티']): return '섹터/테마','경기소비재/뷰티',''
         if any(kw in u for kw in ['소비재']): return '섹터/테마','소비재(기타)',''
@@ -1032,6 +1189,11 @@ def _classify(df):
         if any(kw in u for kw in ['블록체인','디지털자산','비트코인','가상자산','크립토']): return '섹터/테마','블록체인/가상자산',''
         if any(kw in u for kw in ['플랫폼','인터넷','이커머스','커머스']): return '섹터/테마','플랫폼/인터넷',''
         if any(kw in u for kw in ['IT','테크','기술','ICT']): return '섹터/테마','IT/테크',''
+        # 최근 테마 추가
+        if any(kw in u for kw in ['액티브','ACTIVE']) and '채권' not in u and '금리' not in u: return '섹터/테마','액티브',''
+        if any(kw in u for kw in ['멀티에셋','MULTI ASSET','멀티자산']): return '섹터/테마','멀티에셋',''
+        if any(kw in u for kw in ['K-방산','한화방산']): return '섹터/테마','방산/우주항공',''
+        if any(kw in u for kw in ['여행','레저','호텔','리조트','카지노']): return '섹터/테마','여행/레저',''
 
         if any(kw in u for kw in ['배당','고배당','배당성장','DIVIDEND','프리미엄','월배당','분배','인컴']):
             return '배당/인컴','배당',''
@@ -1294,7 +1456,7 @@ def diagnose():
 # ============================================================================
 def build_universe():
     print("╔" + "═"*58 + "╗")
-    print("║   한국 상장 ETF 유니버스 빌더 v6.0 (네이버 금융)          ║")
+    print("║   한국 상장 ETF 유니버스 빌더 v6.1 (네이버 금융)          ║")
     print("╚" + "═"*58 + "╝")
 
     t_start = time.time()
