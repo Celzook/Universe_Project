@@ -40,7 +40,7 @@ def today_kst():
 # 캐시 — base_date도 함께 반환
 # ============================================================================
 @st.cache_data(ttl=3600*6, show_spinner=False)
-def cached_build_universe(min_cap, top_n, cache_version=2):
+def cached_build_universe(min_cap, top_n, cache_version=3):
     Config.MIN_MARKET_CAP_BILLIONS = min_cap
     Config.TOP_N_HOLDINGS = top_n
     Config.BASE_DATE = None  # 매번 새로 찾도록 리셋
@@ -268,8 +268,8 @@ def page_universe():
     # 천단위 콤마 포맷 적용
     fmt_config = {}
     for col_name, fmt in [
-        ('시가총액(억원)', '{:,.0f}'), ('NAV(억원)', '{:,.0f}'),
-        ('종가', '{:,.0f}'), ('거래량', '{:,.0f}'),
+        ('시가총액(억원)', ',.0f'), ('NAV(억원)', ',.0f'),
+        ('종가', ',.0f'), ('거래량', ',.0f'),
     ]:
         if col_name in display_cols:
             fmt_config[col_name] = st.column_config.NumberColumn(col_name, format=fmt)
