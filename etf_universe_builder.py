@@ -119,8 +119,10 @@ def _http_post(url, data, headers=None, timeout=10):
 # ──────────────────────────────────────────────────────────
 def naver_get_all_etfs():
     """네이버 금융 ETF 전종목 조회 → DataFrame
-    index: 티커(6자리)
+    index: 티커(6자리, 중복 제거)
     columns: ETF명, 시가총액(억원), NAV(억원), 종가, 거래량
+
+    ※ 네이버 API는 페이지네이션 없이 전체를 1회 반환
     """
     global _NAVER_ETF_CACHE
     cache_key = datetime.now().strftime("%Y%m%d")
@@ -128,30 +130,14 @@ def naver_get_all_etfs():
         return _NAVER_ETF_CACHE[cache_key].copy()
 
     all_items = []
-    page = 1
-    max_pages = 50
-
-    while page <= max_pages:
-        url = (f"https://finance.naver.com/api/sise/etfItemList.nhn"
-               f"?etfType=0&targetColumn=market_sum&sortOrder=desc&page={page}")
-        try:
-            text = _http_get(url)
-            data = json.loads(text)
-            items = data.get('result', {}).get('etfItemList', [])
-            if not items:
-                break
-            all_items.extend(items)
-
-            total_cnt = data.get('result', {}).get('totalCount', 0)
-            if isinstance(total_cnt, str):
-                total_cnt = int(total_cnt.replace(',', ''))
-            if total_cnt > 0 and len(all_items) >= total_cnt:
-                break
-            page += 1
-            time.sleep(0.05)
-        except Exception as e:
-            print(f"    ⚠️ 네이버 ETF 리스트 page {page} 실패: {e}")
-            break
+    url = ("https://finance.naver.com/api/sise/etfItemList.nhn"
+           "?etfType=0&targetColumn=market_sum&sortOrder=desc")
+    try:
+        text = _http_get(url)
+        data = json.loads(text)
+        all_items = data.get('result', {}).get('etfItemList', [])
+    except Exception as e:
+        print(f"    ⚠️ 네이버 ETF 리스트 실패: {e}")
 
     if not all_items:
         print("  ⚠️ 네이버 ETF 리스트 비어있음!")
@@ -202,6 +188,12 @@ def naver_get_all_etfs():
         })
 
     df = pd.DataFrame(rows).set_index('티커')
+
+    # 중복 티커 제거 (안전장치)
+    if df.index.duplicated().any():
+        dup_count = df.index.duplicated().sum()
+        print(f"    ⚠️ 중복 티커 {dup_count}개 제거")
+        df = df[~df.index.duplicated(keep='first')]
 
     # 시가총액 단위 자동 보정 (혹시 '원' 단위면 → 억원 변환)
     if not df.empty and df['시가총액(억원)'].median() > 1e6:
