@@ -1,6 +1,6 @@
 """
 ==============================================================================
- ETF Universe Explorer — Streamlit Cloud App v3
+ ETF Universe Explorer — Streamlit Cloud App v3.1
 ==============================================================================
 """
 import streamlit as st
@@ -40,7 +40,7 @@ def today_kst():
 # 캐시 — base_date도 함께 반환
 # ============================================================================
 @st.cache_data(ttl=3600*6, show_spinner=False)
-def cached_build_universe(min_cap, top_n):
+def cached_build_universe(min_cap, top_n, cache_version=2):
     Config.MIN_MARKET_CAP_BILLIONS = min_cap
     Config.TOP_N_HOLDINGS = top_n
     Config.BASE_DATE = None  # 매번 새로 찾도록 리셋
@@ -100,7 +100,7 @@ def render_pdf_comparison(selected_tickers, df_pdf, df_uni, key_prefix="comp"):
                     tbl = pd.DataFrame({'종목': valid.index, '비중(%)': [f"{v:.1f}" for v in valid.values]})
                     tbl.index = range(1, len(tbl)+1)
                     tbl.index.name = '#'
-                    st.dataframe(tbl, use_container_width=True, height=390)
+                    st.dataframe(tbl, width='stretch', height=390)
                 else:
                     st.caption("구성종목 없음")
             else:
@@ -116,7 +116,7 @@ def render_sidebar():
     st.sidebar.subheader("1️⃣ 유니버스 구축")
     min_cap = st.sidebar.number_input("최소 시가총액 (억원)", value=200, step=50)
     top_n = st.sidebar.number_input("PDF Top N", value=10, min_value=5, max_value=20)
-    if st.sidebar.button("🚀 유니버스 빌드", type="primary", use_container_width=True):
+    if st.sidebar.button("🚀 유니버스 빌드", type="primary", width='stretch'):
         run_universe_build(min_cap, top_n)
     if st.session_state.universe_built:
         st.sidebar.success(f"✅ {len(st.session_state.df_universe)}개 ETF")
@@ -132,13 +132,13 @@ def render_sidebar():
         st.sidebar.info("⏳ 수집 중...")
     else:
         if st.session_state.universe_built:
-            if st.sidebar.button("🌍 글로벌 수집 재시도", use_container_width=True):
+            if st.sidebar.button("🌍 글로벌 수집 재시도", width='stretch'):
                 start_global_collection()
         else:
             st.sidebar.caption("유니버스 빌드 후 자동 시작")
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔧 진단")
-    if st.sidebar.button("🩺 KRX 연결 진단", use_container_width=True):
+    if st.sidebar.button("🩺 KRX 연결 진단", width='stretch'):
         run_diagnosis()
     st.sidebar.markdown("---")
     return st.sidebar.radio("📌 메뉴", ["유니버스 탐색", "구성종목(PDF) 분석", "수익률 비교"],
@@ -264,7 +264,16 @@ def page_universe():
         'BM_1M(%)','BM_3M(%)','BM_6M(%)','BM_1Y(%)','BM_YTD(%)',
         '연간변동성(%)','종가','거래량'
     ] if c in df.columns]
-    st.dataframe(df[display_cols], use_container_width=True, height=500)
+
+    # 천단위 콤마 포맷 적용
+    fmt_config = {}
+    for col_name, fmt in [
+        ('시가총액(억원)', '{:,.0f}'), ('NAV(억원)', '{:,.0f}'),
+        ('종가', '{:,.0f}'), ('거래량', '{:,.0f}'),
+    ]:
+        if col_name in display_cols:
+            fmt_config[col_name] = st.column_config.NumberColumn(col_name, format=fmt)
+    st.dataframe(df[display_cols], width='stretch', height=500, column_config=fmt_config)
 
     # ETF 선택 → PDF 비교
     etf_options = [f"{t} | {df.at[t,'ETF명'][:30]}" for t in df.index]
@@ -283,7 +292,7 @@ def page_universe():
                     color=cc.values, color_continuous_scale='Viridis')
         fig.update_layout(height=350, showlegend=False, coloraxis_showscale=False,
                         margin=dict(l=0,r=0,t=30,b=0))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     # BM 상위/하위
     if 'BM_YTD(%)' in df.columns and len(df) > 0:
@@ -293,10 +302,10 @@ def page_universe():
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**🟢 상위**")
-            st.dataframe(df.nlargest(15,'BM_YTD(%)')[top_cols].reset_index(), use_container_width=True, hide_index=True)
+            st.dataframe(df.nlargest(15,'BM_YTD(%)')[top_cols].reset_index(), width='stretch', hide_index=True)
         with c2:
             st.markdown("**🔴 하위**")
-            st.dataframe(df.nsmallest(15,'BM_YTD(%)')[top_cols].reset_index(), use_container_width=True, hide_index=True)
+            st.dataframe(df.nsmallest(15,'BM_YTD(%)')[top_cols].reset_index(), width='stretch', hide_index=True)
 
     # 도넛차트 맨 아래
     if '대카테고리' in df.columns:
@@ -307,13 +316,13 @@ def page_universe():
             cc = df['대카테고리'].value_counts()
             fig = px.pie(values=cc.values, names=cc.index, hole=0.4, title="ETF 수")
             fig.update_layout(height=350, margin=dict(l=0,r=0,t=40,b=0))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         with c2:
             if has_cap:
                 cc2 = df.groupby('대카테고리')['시가총액(억원)'].sum()
                 fig2 = px.pie(values=cc2.values, names=cc2.index, hole=0.4, title="시가총액")
                 fig2.update_layout(height=350, margin=dict(l=0,r=0,t=40,b=0))
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width='stretch')
 
 
 # ============================================================================
@@ -359,7 +368,7 @@ def page_pdf():
             _render_stock_analysis_charts(res.head(20), sel, df_uni)
 
         # 결과 테이블
-        st.dataframe(res, use_container_width=True, height=400)
+        st.dataframe(res, width='stretch', height=400)
 
         # ETF 선택 → PDF 비교
         etf_options = [f"{t} | {res.at[t,'ETF명'][:30]}" for t in res.index]
@@ -372,9 +381,9 @@ def page_pdf():
     st.markdown("---")
     st.subheader("🏆 보유 ETF 수 상위 종목")
     ts = stock_counts.head(20).reset_index(); ts.columns = ['종목명','보유 ETF 수']
-    st.dataframe(ts, use_container_width=True, hide_index=True)
+    st.dataframe(ts, width='stretch', hide_index=True)
     with st.expander(f"📋 전체 매트릭스 ({len(df_pdf)} × {len(stock_cols)})"):
-        st.dataframe(df_pdf, use_container_width=True, height=500)
+        st.dataframe(df_pdf, width='stretch', height=500)
 
 
 def _render_stock_analysis_charts(chart_data, stock_name, df_uni):
@@ -420,7 +429,7 @@ def _render_stock_analysis_charts(chart_data, stock_name, df_uni):
         fig1.update_layout(title=f"'{stock_name}' 비중(%)", height=chart_h,
                           yaxis=dict(autorange='reversed'),
                           margin=dict(l=0, r=40, t=40, b=0))
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig1, width='stretch')
 
     # ── 중: BM 성과 바 (선택된 기간만) ──
     with col2:
@@ -436,7 +445,7 @@ def _render_stock_analysis_charts(chart_data, stock_name, df_uni):
                               yaxis=dict(autorange='reversed'),
                               margin=dict(l=0, r=10, t=40, b=0),
                               legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0))
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width='stretch')
         else:
             st.caption("기간을 선택하세요")
 
@@ -452,7 +461,7 @@ def _render_stock_analysis_charts(chart_data, stock_name, df_uni):
                             aspect='auto', zmin=-20, zmax=20)
             fig3.update_layout(title="BM성과 히트맵(%)", height=chart_h,
                               margin=dict(l=0, r=0, t=40, b=0))
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width='stretch')
         else:
             st.caption("기간을 선택하세요")
 
@@ -528,7 +537,40 @@ def _render_kr_tab(kr_close, df_uni, start_date, end_date):
         vt = kr_close.columns.tolist()
 
     opts = [f"{t} | {df_uni.at[t,'ETF명'][:25]}" if t in df_uni.index else t for t in vt]
-    sel = st.multiselect("ETF 선택", opts, default=opts[:5], key="kr_sel")
+
+    # ── 프리셋 버튼 ──
+    preset_default = opts[:5]
+    if df_uni is not None and not df_uni.empty:
+        # 프리셋 생성 함수
+        def _make_preset(tickers_list):
+            return [f"{t} | {df_uni.at[t,'ETF명'][:25]}" if t in df_uni.index else t
+                    for t in tickers_list if t in vt]
+
+        # 각 프리셋 계산
+        uni_vt = df_uni.loc[[t for t in vt if t in df_uni.index]]
+        presets = {}
+        if '시가총액(억원)' in uni_vt.columns and not uni_vt.empty:
+            presets['시총 Top 10'] = _make_preset(
+                uni_vt.nlargest(10, '시가총액(억원)').index.tolist())
+        if '거래량' in uni_vt.columns and not uni_vt.empty:
+            presets['거래량 Top 10'] = _make_preset(
+                uni_vt.nlargest(10, '거래량').index.tolist())
+        if 'BM_YTD(%)' in uni_vt.columns and not uni_vt.empty:
+            presets['BM 상위 10'] = _make_preset(
+                uni_vt.nlargest(10, 'BM_YTD(%)').index.tolist())
+            presets['BM 하위 10'] = _make_preset(
+                uni_vt.nsmallest(10, 'BM_YTD(%)').index.tolist())
+
+        if presets:
+            st.caption("📌 프리셋")
+            pcols = st.columns(len(presets))
+            for i, (label, preset_opts) in enumerate(presets.items()):
+                with pcols[i]:
+                    if st.button(label, key=f"preset_{label}"):
+                        st.session_state['kr_sel'] = preset_opts
+                        st.rerun()
+
+    sel = st.multiselect("ETF 선택", opts, default=preset_default, key="kr_sel")
     if not sel:
         return
 
@@ -598,7 +640,7 @@ def _render_kr_tab(kr_close, df_uni, start_date, end_date):
             hovermode='x unified',
             legend=dict(orientation='h', yanchor='bottom', y=-0.3, x=0)
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     # ── [기능2] 수익률 상세 — 일별 수익률 테이블 ──
     with st.expander("📋 수익률 상세 (일별)"):
@@ -608,7 +650,7 @@ def _render_kr_tab(kr_close, df_uni, start_date, end_date):
             daily_ret.index = daily_ret.index.strftime('%Y-%m-%d')
             daily_ret.index.name = '일자'
             daily_ret = daily_ret.round(2)
-            st.dataframe(daily_ret.sort_index(ascending=False), use_container_width=True, height=400)
+            st.dataframe(daily_ret.sort_index(ascending=False), width='stretch', height=400)
         else:
             st.caption("데이터 부족")
 
@@ -658,7 +700,7 @@ def _render_global_tab(gd, start_date, end_date, data_key):
         if nm: norm.columns = [f"{t} ({nm.get(t,t)})" for t in norm.columns]
         fig = px.line(norm, title=f"{label} 추이 (정규화)")
         fig.update_layout(height=400, yaxis_title="수익률(%)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     # 상관관계 (지수만)
     if data_key == 'indices' and len(sel_tickers) >= 2:
@@ -666,7 +708,7 @@ def _render_global_tab(gd, start_date, end_date, data_key):
         if nm: corr.index = [nm.get(t,t) for t in corr.index]; corr.columns = [nm.get(t,t) for t in corr.columns]
         fig3 = px.imshow(corr, text_auto='.2f', color_continuous_scale='RdBu_r', zmin=-1, zmax=1)
         fig3.update_layout(height=450)
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, width='stretch')
 
     # 일별 수익률 상세
     with st.expander("📋 수익률 상세 (일별)"):
@@ -675,7 +717,7 @@ def _render_global_tab(gd, start_date, end_date, data_key):
             if nm: dr.columns = [f"{t} ({nm.get(t,t)})" for t in dr.columns]
             dr.index = dr.index.strftime('%Y-%m-%d')
             dr.index.name = '일자'
-            st.dataframe(dr.round(2).sort_index(ascending=False), use_container_width=True, height=400)
+            st.dataframe(dr.round(2).sort_index(ascending=False), width='stretch', height=400)
 
 
 def _draw_return_bar(df_prices, start_date, end_date, title, name_map=None):
@@ -695,7 +737,7 @@ def _draw_return_bar(df_prices, start_date, end_date, title, name_map=None):
     fig.update_layout(title=f"{title} 수익률 ({start_date}~{end_date})",
                      height=max(300,len(rs)*35), xaxis_title="수익률(%)",
                      margin=dict(l=0,r=60,t=40,b=0))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 
 # ============================================================================
