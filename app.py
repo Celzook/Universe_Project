@@ -40,7 +40,7 @@ def today_kst():
 # 캐시 — base_date도 함께 반환
 # ============================================================================
 @st.cache_data(ttl=3600*6, show_spinner=False)
-def cached_build_universe(min_cap, top_n, cache_version=3):
+def cached_build_universe(min_cap, top_n, cache_version=4):
     Config.MIN_MARKET_CAP_BILLIONS = min_cap
     Config.TOP_N_HOLDINGS = top_n
     Config.BASE_DATE = None  # 매번 새로 찾도록 리셋
@@ -265,15 +265,16 @@ def page_universe():
         '연간변동성(%)','종가','거래량'
     ] if c in df.columns]
 
-    # 천단위 콤마 포맷 적용
-    fmt_config = {}
-    for col_name, fmt in [
-        ('시가총액(억원)', ',.0f'), ('NAV(억원)', ',.0f'),
-        ('종가', ',.0f'), ('거래량', ',.0f'),
-    ]:
-        if col_name in display_cols:
-            fmt_config[col_name] = st.column_config.NumberColumn(col_name, format=fmt)
-    st.dataframe(df[display_cols], width='stretch', height=500, column_config=fmt_config)
+    # 천단위 콤마 포맷 — Pandas Styler 사용 (Streamlit NumberColumn은 printf만 지원하므로)
+    df_display = df[display_cols].copy()
+    # 숫자 컬럼 dtype 보장
+    for col in ['시가총액(억원)', 'NAV(억원)', '종가', '거래량']:
+        if col in df_display.columns:
+            df_display[col] = pd.to_numeric(df_display[col], errors='coerce')
+    # Styler로 포맷 (천단위 콤마 + NaN은 빈 문자열)
+    fmt_dict = {c: '{:,.0f}' for c in ['시가총액(억원)', 'NAV(억원)', '종가', '거래량'] if c in df_display.columns}
+    styled = df_display.style.format(fmt_dict, na_rep='', precision=2)
+    st.dataframe(styled, width='stretch', height=500)
 
     # ETF 선택 → PDF 비교
     etf_options = [f"{t} | {df.at[t,'ETF명'][:30]}" for t in df.index]
