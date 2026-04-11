@@ -552,11 +552,11 @@ def step1_get_tickers_and_names(base_date):
             df.index.name = '티커'
             return df
 
-        # 이름만 추출 (시총/NAV 등은 Step 3에서 활용)
-        df = df_naver[['ETF명']].copy()
+        # 전체 컬럼 유지 (시가총액/NAV/종가/거래량 포함 — Step 3에서 별도 join 불필요)
+        df = df_naver.copy()
         df.index.name = '티커'
 
-        # 메타데이터 캐시 저장 (Step 3에서 사용)
+        # 메타데이터 캐시 저장 (하위 호환)
         _save_cache(f"naver_meta_{base_date}.pkl", df_naver)
 
         print(f"  → DataFrame: {df.shape}, 컬럼: {df.columns.tolist()}")
@@ -636,50 +636,54 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
     t0 = time.time()
     before = len(df)
 
-    # 캐시 확인
-    cache_name = f"mktcap_v5_{base_date}.pkl"
-    cached = _load_cache(cache_name)
-    if cached is not None and '시가총액(억원)' in cached.columns:
-        print(f"  → 💾 시총 캐시 로드: {len(cached)}개")
-        join_cols = [c for c in ['시가총액(억원)', 'NAV(억원)', '종가', '거래량'] if c in cached.columns]
-        df = df.join(cached[join_cols].dropna(how='all'), how='left')
-        df = df[df['시가총액(억원)'].notna() & (df['시가총액(억원)'] >= min_cap)].copy()
-        df['시가총액(억원)'] = df['시가총액(억원)'].astype(int)
-        print(f"  → {before}개 → {len(df)}개")
-        print(f"  ⏱️ Step 3: {time.time()-t0:.1f}초")
-        return df
-
-    # 네이버 메타데이터에서 시가총액 가져오기
-    naver_meta = _load_cache(f"naver_meta_{base_date}.pkl")
-    if naver_meta is None:
-        print("  → 네이버 메타데이터 없음, 재수집...")
-        naver_meta = naver_get_all_etfs()
-
-    if naver_meta is not None and not naver_meta.empty:
-        print(f"  → 네이버 시총 데이터: {len(naver_meta)}개")
-
-        meta_cols = ['시가총액(억원)', 'NAV(억원)', '종가', '거래량']
-        available_cols = [c for c in meta_cols if c in naver_meta.columns]
-        df = df.join(naver_meta[available_cols], how='left')
-
-        if '시가총액(억원)' in df.columns:
-            valid = df['시가총액(억원)'].notna() & (df['시가총액(억원)'] >= min_cap)
-            df = df[valid].copy()
-            df['시가총액(억원)'] = df['시가총액(억원)'].astype(int)
-
-            if not df.empty:
-                print(f"  → 시가총액 범위: {df['시가총액(억원)'].min():,} ~ {df['시가총액(억원)'].max():,}억원")
-
-            # 캐시 저장 (종가/거래량도 포함)
-            cache_df = df[['시가총액(억원)']].copy()
-            for extra_col in ['NAV(억원)', '종가', '거래량']:
-                if extra_col in df.columns:
-                    cache_df[extra_col] = df[extra_col]
-            _save_cache(cache_name, cache_df)
-        else:
-            print("  ⚠️ 시가총액 컬럼 없음 — 필터 건너뜀")
+    # Step 1에서 이미 시가총액이 포함된 경우 — 별도 join 불필요
+    if '시가총액(억원)' in df.columns and df['시가총액(억원)'].notna().any():
+        print(f"  → 시가총액 컬럼 이미 존재 ({df['시가총액(억원)'].notna().sum()}개)")
     else:
-        print("  ⚠️ 시가총액 수집 실패 — 필터 건너뜀")
+        # 시가총액이 없으면 캐시 또는 네이버 메타에서 join (하위 호환)
+        cache_name = f"mktcap_v6_{base_date}.pkl"
+        cached = _load_cache(cache_name)
+        if cached is not None and '시가총액(억원)' in cached.columns:
+            print(f"  → 💾 시총 캐시 로드: {len(cached)}개")
+            join_cols = [c for c in ['시가총액(억원)', 'NAV(억원)', '종가', '거래량'] if c in cached.columns]
+            df = df.join(cached[join_cols].dropna(how='all'), how='left')
+        else:
+            naver_meta = _load_cache(f"naver_meta_{base_date}.pkl")
+            if naver_meta is None:
+                print("  → 네이버 메타데이터 없음, 재수집...")
+                naver_meta = naver_get_all_etfs()
+
+            if naver_meta is not None and not naver_meta.empty:
+                print(f"  → 네이버 시총 데이터: {len(naver_meta)}개")
+                meta_cols = ['시가총액(억원)', 'NAV(억원)', '종가', '거래량']
+                available_cols = [c for c in meta_cols if c in naver_meta.columns]
+                df = df.join(naver_meta[available_cols], how='left')
+
+    # 시가총액 필터 적용
+    if '시가총액(억원)' in df.columns:
+        valid = df['시가총액(억원)'].notna() & (df['시가총액(억원)'] >= min_cap)
+        df = df[valid].copy()
+
+        # 단위 자동 보정 (혹시 '원' 단위면 → 억원 변환)
+        if not df.empty and df['시가총액(억원)'].median() > 1e6:
+            df['시가총액(억원)'] = (df['시가총액(억원)'] / 1e8).round(0)
+            if 'NAV(억원)' in df.columns:
+                df['NAV(억원)'] = (df['NAV(억원)'] / 1e8).round(2)
+
+        df['시가총액(억원)'] = df['시가총액(억원)'].astype(int)
+
+        if not df.empty:
+            print(f"  → 시가총액 범위: {df['시가총액(억원)'].min():,} ~ {df['시가총액(억원)'].max():,}억원")
+
+        # 캐시 저장 (종가/거래량도 포함)
+        cache_name = f"mktcap_v6_{base_date}.pkl"
+        cache_df = df[['시가총액(억원)']].copy()
+        for extra_col in ['NAV(억원)', '종가', '거래량']:
+            if extra_col in df.columns:
+                cache_df[extra_col] = df[extra_col]
+        _save_cache(cache_name, cache_df)
+    else:
+        print("  ⚠️ 시가총액 컬럼 없음 — 필터 건너뜀")
 
     print(f"  → {before}개 → {len(df)}개 (시총 {min_cap}억+ 필터)")
 
@@ -815,7 +819,7 @@ def _fetch_prices_naver(tickers, start_date, end_date):
 def _collect_listing_dates(df, tickers, base_date):
     print("\n  ── 4-B: 설정일 수집 (네이버 금융) ──")
 
-    cache_file = os.path.join(Config.CACHE_DIR, "listing_dates_v5.pkl")
+    cache_file = os.path.join(Config.CACHE_DIR, "listing_dates_v6.pkl")
     cached = {}
     if Config.USE_CACHE and os.path.exists(cache_file):
         try:
