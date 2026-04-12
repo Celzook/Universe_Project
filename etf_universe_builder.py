@@ -1106,126 +1106,89 @@ def _krx_holdings_batch(tickers, base_date):
 
 
 def _naver_etf_holdings(ticker):
-    """네이버 ETF 구성종목 스크래핑 — 여러 방법 시도 (KRX fallback)"""
+    """네이버 ETF 구성종목 스크래핑
 
-    # 방법 1: 네이버 증권 모바일 API (JSON) — 가장 안정적
+    진단으로 확인된 실제 HTML 구조 (finance.naver.com/item/main.naver):
+      <th class="ctg">구성종목(구성자산)</th>
+      <th class="per">구성비중</th>
+      ...
+      <td class="ctg"><a href="...">삼성전자</a></td>
+      <td>7,034</td>
+      <td class="per">25.30</td>
+    """
+
+    # 방법 1: finance.naver.com/item/main.naver — 확인된 HTML 구조 regex 파싱
     try:
-        url = f"https://m.stock.naver.com/api/stock/{ticker}/etf/portfolio"
-        hdr = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
-               'Referer': f'https://m.stock.naver.com/domestic/stock/{ticker}/etf'}
-        if HAS_REQUESTS:
-            resp = _requests_lib.get(url, headers=hdr, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                items = []
+        url = f"https://finance.naver.com/item/main.naver?code={ticker}"
+        html = _http_get(url, encoding='utf-8', timeout=15)
 
-                # API 응답은 dict 또는 list 형태일 수 있음
-                # dict인 경우 구성종목 리스트를 담는 키 후보를 모두 시도
-                port = data
-                if isinstance(data, dict):
-                    for list_key in ('portfolioList', 'portfolio', 'etfMajorHoldingList',
-                                     'result', 'stocks', 'items', 'components',
-                                     'holdingList', 'holdings'):
-                        v = data.get(list_key)
-                        if isinstance(v, list) and v:
-                            port = v
-                            break
-                        if isinstance(v, dict):
-                            # 한 단계 더 내려가기
-                            for inner_key in ('etfMajorHoldingList', 'portfolioList',
-                                              'stocks', 'items'):
-                                iv = v.get(inner_key)
-                                if isinstance(iv, list) and iv:
-                                    port = iv
-                                    break
-                            if isinstance(port, list):
-                                break
-
-                if isinstance(port, list):
-                    for item in port:
-                        if not isinstance(item, dict):
-                            continue
-                        # 종목명 후보 키
-                        name = ''
-                        for nk in ('stockName', 'itemName', 'name', 'ISU_NM',
-                                   'itemname', '종목명', 'stockNm'):
-                            v = item.get(nk)
-                            if v and str(v).strip():
-                                name = str(v).strip()
-                                break
-                        # 비중 후보 키
-                        weight = 0.0
-                        for wk in ('weightedValue', 'weight', 'ratio',
-                                   'COMPST_RTO', 'proportion', 'holdingRatio',
-                                   'per', 'percentage', '비중'):
-                            wv = item.get(wk)
-                            if wv is not None:
-                                try:
-                                    weight = float(str(wv).replace(',', '').replace('%', ''))
-                                    break
-                                except (ValueError, TypeError):
-                                    continue
-                        if weight > 0 and name:
-                            items.append((name[:20], round(weight, 2)))
-                if items:
-                    items.sort(key=lambda x: x[1], reverse=True)
-                    return items[:Config.TOP_N_HOLDINGS]
-    except Exception:
-        pass
-
-    # 방법 2: 네이버 금융 ETF 상세 페이지 HTML 파싱 (pandas.read_html)
-    # 주의: _http_get()이 반환하는 html은 이미 파이썬 문자열이므로
-    #        pd.read_html(html)처럼 직접 전달해야 함 (encoding 인자는 bytes일 때만 유효)
-    try:
-        url = f"https://finance.naver.com/item/etfinfo.naver?code={ticker}"
-        # EUC-KR 명시 (네이버 금융 페이지)
-        html = _http_get(url, encoding='euc-kr', timeout=10)
-        import io
-        tables = pd.read_html(io.StringIO(html))
-        for tbl in tables:
-            cols = tbl.columns.tolist()
-            name_col = weight_col = None
-            for c in cols:
-                cs = str(c)
-                if any(kw in cs for kw in ['종목명', '종목', '구성종목', '보유종목']):
-                    name_col = c
-                if any(kw in cs for kw in ['비중', '비율', '%', '편입비']):
-                    weight_col = c
-            if name_col and weight_col:
-                items = []
-                for _, row in tbl.iterrows():
-                    nm = str(row[name_col]).strip()
-                    try:
-                        w = float(str(row[weight_col]).replace(',', '').replace('%', ''))
-                    except (ValueError, TypeError):
-                        continue
-                    if w > 0 and nm and nm.lower() != 'nan':
-                        items.append((nm[:20], round(w, 2)))
-                if items:
-                    items.sort(key=lambda x: x[1], reverse=True)
-                    return items[:Config.TOP_N_HOLDINGS]
-    except Exception:
-        pass
-
-    # 방법 3: 네이버 금융 coinfo 페이지 정규식
-    try:
-        url = f"https://finance.naver.com/item/coinfo.naver?code={ticker}&target=finsum_main"
-        html = _http_get(url, encoding='euc-kr', timeout=10)
         items = []
-        for m in re.finditer(
-            r'title="([^"]{2,30})"[^>]*>[^<]*</a>\s*</td>\s*<td[^>]*>\s*([\d,.]+)',
+        # 구성종목 테이블 섹션만 잘라냄 (오염 방지)
+        section_m = re.search(
+            r'구성종목\(구성자산\)(.*?)</tbody>',
             html, re.DOTALL
-        ):
-            name = m.group(1).strip()[:20]
-            try:
-                weight = float(m.group(2).replace(',', ''))
-                if weight > 0 and name:
-                    items.append((name, round(weight, 2)))
-            except (ValueError, TypeError):
-                continue
+        )
+        if section_m:
+            section = section_m.group(1)
+            # 각 행 파싱:
+            #   <td class="ctg">...<a ...>종목명</a>...</td>
+            #   <td>주식수</td>
+            #   <td class="per">구성비중</td>
+            row_pat = (
+                r'<td\s+class="ctg">'           # 종목명 셀 열기
+                r'(?:(?!</td>).)*?'             # </td> 전까지 임의 내용
+                r'<a[^>]*>([^<]+)</a>'          # <a>종목명</a>
+                r'(?:(?!</td>).)*?</td>'        # 종목명 셀 닫기
+                r'(?:(?!</tr>).)*?'             # 주식수 셀 건너뜀
+                r'<td\s+class="per">\s*([\d.]+)' # <td class="per">구성비중
+            )
+            for m in re.finditer(row_pat, section, re.DOTALL):
+                name = m.group(1).strip()
+                try:
+                    weight = float(m.group(2))
+                    if weight > 0 and name:
+                        items.append((name[:20], round(weight, 2)))
+                except (ValueError, TypeError):
+                    continue
+
         if items:
             items.sort(key=lambda x: x[1], reverse=True)
             return items[:Config.TOP_N_HOLDINGS]
+    except Exception:
+        pass
+
+    # 방법 2: navercomp.wisereport.co.kr (coinfo.naver 의 iframe URL — 동일 내용)
+    # HTML 구조 미확인 → pd.read_html + regex 복합 시도
+    try:
+        url2 = (f"https://navercomp.wisereport.co.kr"
+                f"/v2/ETF/index.aspx?cmp_cd={ticker}")
+        html2 = _http_get(url2, encoding='utf-8', timeout=15)
+
+        # wisereport: CU당 구성종목 섹션 추출 후 td 파싱
+        section2_m = re.search(
+            r'CU당 구성종목(.*?)</table>',
+            html2, re.DOTALL
+        )
+        if section2_m:
+            sec2 = section2_m.group(1)
+            # 종목명(<td> 또는 <a>) + 비중(숫자 포함 td) 쌍 추출
+            rows2 = re.findall(
+                r'<td[^>]*>\s*(?:<a[^>]*>)?([가-힣A-Za-z][가-힣A-Za-z0-9&(). ]{1,24}?)(?:</a>)?\s*</td>'
+                r'(?:.*?<td[^>]*>\s*([\d]+\.[\d]+)\s*</td>)',
+                sec2, re.DOTALL
+            )
+            items2 = []
+            for name, weight_str in rows2:
+                name = name.strip()
+                try:
+                    w = float(weight_str)
+                    if w > 0 and name:
+                        items2.append((name[:20], round(w, 2)))
+                except (ValueError, TypeError):
+                    continue
+            if items2:
+                items2.sort(key=lambda x: x[1], reverse=True)
+                return items2[:Config.TOP_N_HOLDINGS]
     except Exception:
         pass
 
