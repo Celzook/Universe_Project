@@ -1135,15 +1135,16 @@ def _krx_holdings_batch(tickers, base_date):
 def _naver_etf_holdings(ticker):
     """네이버 ETF 구성종목 스크래핑
 
-    국내 ETF: <td class="ctg">종목명</td> + <td class="per">비중</td> 모두 있음
-    해외 ETF: <td class="ctg">종목명</td> 은 있으나 class="per" 가 비거나 0일 수 있음
-              → 비중 없는 경우 이름만 수집 (weight=0.0 저장)
+    진단 확인된 실제 HTML 구조:
+      국내 ETF: <td class="ctg"><a href="...">삼성전자</a></td>
+                <td class="per">25.30</td>
+      해외 ETF: <td class="ctg"><span>NVIDIA CORP</span></td>
+                <td class="per">-</td>   ← 숫자 아닌 '-'
     """
 
     # 방법 1: finance.naver.com/item/main.naver
     try:
         url = f"https://finance.naver.com/item/main.naver?code={ticker}"
-        # UTF-8 우선, 실패 시 EUC-KR (이전 진단에서 main.naver는 UTF-8 확인)
         html = None
         for enc in ('utf-8', 'euc-kr'):
             try:
@@ -1162,48 +1163,53 @@ def _naver_etf_holdings(ticker):
         if section_m:
             section = section_m.group(1)
 
-            # ── 1-A: 이름 + 비중 모두 있는 행 (국내 ETF 표준 구조) ──
-            row_pat_full = (
+            # ── 1-A: 국내 ETF — <a> 태그 + 비중 숫자 ──────────────
+            row_pat_a = (
                 r'<td\s+class="ctg">'
                 r'(?:(?!</td>).)*?'
-                r'<a[^>]*>([^<]+)</a>'
+                r'<a[^>]*>([^<]+)</a>'       # <a>종목명</a>
                 r'(?:(?!</td>).)*?</td>'
                 r'(?:(?!</tr>).)*?'
-                r'<td\s+class="per">\s*([\d.]+)'  # 숫자 비중 필수
+                r'<td\s+class="per">\s*([\d.]+)'  # 숫자 비중
             )
-            items_with_weight = []
-            for m in re.finditer(row_pat_full, section, re.DOTALL):
+            items_domestic = []
+            for m in re.finditer(row_pat_a, section, re.DOTALL):
                 name = m.group(1).strip()
                 try:
                     weight = float(m.group(2))
                     if weight > 0 and name:
-                        items_with_weight.append((name[:20], round(weight, 2)))
+                        items_domestic.append((name[:20], round(weight, 2)))
                 except (ValueError, TypeError):
                     continue
 
-            if items_with_weight:
-                items_with_weight.sort(key=lambda x: x[1], reverse=True)
-                return items_with_weight[:Config.TOP_N_HOLDINGS]
+            if items_domestic:
+                items_domestic.sort(key=lambda x: x[1], reverse=True)
+                return items_domestic[:Config.TOP_N_HOLDINGS]
 
-            # ── 1-B: 이름만 있는 행 (해외 ETF — 비중 없거나 0인 경우) ──
-            row_pat_name_only = (
+            # ── 1-B: 해외 ETF — <span> 태그, 비중은 '-' ───────────
+            # 진단 확인: NVIDIA CORP, APPLE INC 등이 <span>으로 감싸짐
+            row_pat_b = (
                 r'<td\s+class="ctg">'
                 r'(?:(?!</td>).)*?'
-                r'<a[^>]*>([^<]+)</a>'
+                r'<span[^>]*>([^<]+)</span>'  # <span>종목명</span>
+                r'(?:(?!</td>).)*?</td>'
             )
-            items_no_weight = []
-            for m in re.finditer(row_pat_name_only, section, re.DOTALL):
+            items_overseas = []
+            for m in re.finditer(row_pat_b, section, re.DOTALL):
                 name = m.group(1).strip()
                 if name and len(name) >= 2:
-                    items_no_weight.append((name[:20], 0.0))
-            if items_no_weight:
-                # 등장 순서 유지 (비중 없으므로 정렬 의미 없음)
-                return items_no_weight[:Config.TOP_N_HOLDINGS]
+                    items_overseas.append((name[:20], 0.0))
+
+            if items_overseas:
+                # 비중 없으므로 등장 순서 유지 (정렬 안 함)
+                return items_overseas[:Config.TOP_N_HOLDINGS]
 
     except Exception:
         pass
 
-    # 방법 2: navercomp.wisereport.co.kr (coinfo.naver iframe과 동일 URL)
+    # 방법 2: navercomp.wisereport.co.kr
+    # ※ 진단 확인: JS 동적 로드라 테이블 skeleton만 있음 → 이름 수집 불가
+    #   그래도 일부 국내 ETF는 HTML에 데이터 있을 수 있으므로 유지
     try:
         url2 = (f"https://navercomp.wisereport.co.kr"
                 f"/v2/ETF/index.aspx?cmp_cd={ticker}")
@@ -1216,7 +1222,6 @@ def _naver_etf_holdings(ticker):
         if section2_m:
             sec2 = section2_m.group(1)
 
-            # 2-A: 이름 + 비중
             rows2 = re.findall(
                 r'<td[^>]*>\s*(?:<a[^>]*>)?([가-힣A-Za-z][가-힣A-Za-z0-9&(). ]{1,24}?)(?:</a>)?\s*</td>'
                 r'(?:.*?<td[^>]*>\s*([\d]+\.[\d]+)\s*</td>)',
@@ -1234,21 +1239,6 @@ def _naver_etf_holdings(ticker):
             if items2:
                 items2.sort(key=lambda x: x[1], reverse=True)
                 return items2[:Config.TOP_N_HOLDINGS]
-
-            # 2-B: 이름만 (해외 ETF fallback)
-            names2 = re.findall(
-                r'<td[^>]*>\s*(?:<a[^>]*>)?([A-Za-z가-힣][A-Za-z가-힣0-9&(). ]{1,24}?)(?:</a>)?\s*</td>',
-                sec2
-            )
-            items2_name = []
-            seen = set()
-            for nm in names2:
-                nm = nm.strip()
-                if nm and len(nm) >= 2 and nm not in seen:
-                    seen.add(nm)
-                    items2_name.append((nm[:20], 0.0))
-            if items2_name:
-                return items2_name[:Config.TOP_N_HOLDINGS]
 
     except Exception:
         pass
