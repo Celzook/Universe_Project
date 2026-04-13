@@ -1,15 +1,22 @@
 """
 ==============================================================================
- 한국 상장 ETF Managed Portfolio 유니버스 빌더 v6.2
+ 한국 상장 ETF Managed Portfolio 유니버스 빌더 v6.3
 ==============================================================================
  [pykrx 완전 제거 → 네이버 금융 + KRX 직접 HTTP]
 
+ v6.3 수정사항:
+  - [버그수정] 설정일: '상장일' 키워드 + 'YYYY년 MM월 DD일' 한국어 날짜 형식 파싱
+  - [버그수정] _parse_date_str: YYYY년 MM월 DD일 형식 추가
+  - [컬럼변경] NAV(억원) 삭제, 종가 위치 이동 (시가총액 바로 뒤)
+  - [컬럼변경] 거래량 → 거래량(주) 이름 변경
+  - [컬럼변경] 거래대금(억) 컬럼 추가 (amonut 필드 /100)
+  - [캐시버전] listing_dates_v8 (기존 빈 캐시 무효화)
+
  v6.2 수정사항:
   - [버그수정] naver_get_index_history: requestType=2 → 1 (KOSPI 0일 문제 해결)
-  - [버그수정] _naver_etf_holdings: 모바일 API JSON key 확장, read_html 인코딩 버그 수정
-  - [버그수정] _naver_listing_dates: etfItemList API list_dt YYYYMMDD 포맷 처리,
-                                      etfinfo.naver 페이지 추가 시도
-  - [캐시 버전] listing_dates_v7, holdings_v7 (기존 빈 캐시 무효화)
+  - [버그수정] _naver_etf_holdings: main.naver HTML 구조 기반 regex 파싱으로 교체
+  - [버그수정] _naver_listing_dates: etfItemList API list_dt YYYYMMDD 포맷 처리
+  - [캐시버전] listing_dates_v7, holdings_v7
 
  데이터 소스:
   - 네이버 금융 API: ETF 전종목 리스트 (티커/이름/시총/NAV/종가/거래량)
@@ -155,9 +162,13 @@ def _http_post(url, data, headers=None, timeout=10):
 def naver_get_all_etfs():
     """네이버 금융 ETF 전종목 조회 → DataFrame
     index: 티커(6자리, 중복 제거)
-    columns: ETF명, 시가총액(억원), NAV(억원), 종가, 거래량
+    columns: ETF명, 시가총액(억원), 종가, 거래량(주), 거래대금(억)
 
-    ※ 네이버 API는 페이지네이션 없이 전체를 1회 반환
+    ※ 네이버 API 필드 (v2 진단 확인):
+       marketSum: 시가총액(억원)
+       nowVal:    종가(원)
+       quant:     거래량(주)
+       amonut:    거래대금(백만원) → /100 → 억원  ← API 오타 필드명
     """
     global _NAVER_ETF_CACHE
     cache_key = datetime.now().strftime("%Y%m%d")
@@ -176,7 +187,7 @@ def naver_get_all_etfs():
 
     if not all_items:
         print("  ⚠️ 네이버 ETF 리스트 비어있음!")
-        return pd.DataFrame(columns=['ETF명', '시가총액(억원)', 'NAV(억원)', '종가', '거래량'])
+        return pd.DataFrame(columns=['ETF명', '시가총액(억원)', '종가', '거래량(주)', '거래대금(억)'])
 
     rows = []
     for item in all_items:
@@ -185,19 +196,12 @@ def naver_get_all_etfs():
             continue
         name = str(item.get('itemname', 'N/A')).strip()
 
-        # 시가총액 (네이버 API는 '억원' 단위)
+        # 시가총액 (억원 단위)
         raw_cap = item.get('marketSum', 0)
         try:
             cap = float(str(raw_cap).replace(',', ''))
         except (ValueError, TypeError):
             cap = 0
-
-        # NAV
-        raw_nav = item.get('nav', 0)
-        try:
-            nav = float(str(raw_nav).replace(',', ''))
-        except (ValueError, TypeError):
-            nav = 0
 
         # 종가
         raw_price = item.get('nowVal', 0)
@@ -206,25 +210,32 @@ def naver_get_all_etfs():
         except (ValueError, TypeError):
             close_price = 0
 
-        # 거래량
+        # 거래량(주)
         raw_vol = item.get('quant', 0)
         try:
             volume = int(float(str(raw_vol).replace(',', '')))
         except (ValueError, TypeError):
             volume = 0
 
+        # 거래대금(억) — API 필드명 'amonut'(오타), 단위: 백만원 → /100 → 억원
+        raw_amt = item.get('amonut', item.get('amount', 0))
+        try:
+            trade_amount = round(float(str(raw_amt).replace(',', '')) / 100, 1)
+        except (ValueError, TypeError):
+            trade_amount = 0
+
         rows.append({
             '티커': ticker,
             'ETF명': name,
             '시가총액(억원)': cap,
-            'NAV(억원)': nav,
             '종가': close_price,
-            '거래량': volume,
+            '거래량(주)': volume,
+            '거래대금(억)': trade_amount,
         })
 
     df = pd.DataFrame(rows).set_index('티커')
 
-    # 중복 티커 제거 (안전장치)
+    # 중복 티커 제거
     if df.index.duplicated().any():
         dup_count = df.index.duplicated().sum()
         print(f"    ⚠️ 중복 티커 {dup_count}개 제거")
@@ -233,7 +244,6 @@ def naver_get_all_etfs():
     # 시가총액 단위 자동 보정 (혹시 '원' 단위면 → 억원 변환)
     if not df.empty and df['시가총액(억원)'].median() > 1e6:
         df['시가총액(억원)'] = (df['시가총액(억원)'] / 1e8).round(0)
-        df['NAV(억원)'] = (df['NAV(억원)'] / 1e8).round(2)
 
     _NAVER_ETF_CACHE[cache_key] = df.copy()
     return df
@@ -652,7 +662,7 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
         cached = _load_cache(cache_name)
         if cached is not None and '시가총액(억원)' in cached.columns:
             print(f"  → 💾 시총 캐시 로드: {len(cached)}개")
-            join_cols = [c for c in ['시가총액(억원)', 'NAV(억원)', '종가', '거래량'] if c in cached.columns]
+            join_cols = [c for c in ['시가총액(억원)', '종가', '거래량(주)', '거래대금(억)'] if c in cached.columns]
             df = df.join(cached[join_cols].dropna(how='all'), how='left')
         else:
             naver_meta = _load_cache(f"naver_meta_{base_date}.pkl")
@@ -662,7 +672,7 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
 
             if naver_meta is not None and not naver_meta.empty:
                 print(f"  → 네이버 시총 데이터: {len(naver_meta)}개")
-                meta_cols = ['시가총액(억원)', 'NAV(억원)', '종가', '거래량']
+                meta_cols = ['시가총액(억원)', '종가', '거래량(주)', '거래대금(억)']
                 available_cols = [c for c in meta_cols if c in naver_meta.columns]
                 df = df.join(naver_meta[available_cols], how='left')
 
@@ -674,8 +684,6 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
         # 단위 자동 보정 (혹시 '원' 단위면 → 억원 변환)
         if not df.empty and df['시가총액(억원)'].median() > 1e6:
             df['시가총액(억원)'] = (df['시가총액(억원)'] / 1e8).round(0)
-            if 'NAV(억원)' in df.columns:
-                df['NAV(억원)'] = (df['NAV(억원)'] / 1e8).round(2)
 
         df['시가총액(억원)'] = df['시가총액(억원)'].astype(int)
 
@@ -685,7 +693,7 @@ def step3_market_cap_filter(df, base_date, min_cap=100):
         # 캐시 저장 (종가/거래량도 포함)
         cache_name = f"mktcap_v6_{base_date}.pkl"
         cache_df = df[['시가총액(억원)']].copy()
-        for extra_col in ['NAV(억원)', '종가', '거래량']:
+        for extra_col in ['종가', '거래량(주)', '거래대금(억)']:
             if extra_col in df.columns:
                 cache_df[extra_col] = df[extra_col]
         _save_cache(cache_name, cache_df)
@@ -826,7 +834,7 @@ def _fetch_prices_naver(tickers, start_date, end_date):
 def _collect_listing_dates(df, tickers, base_date):
     print("\n  ── 4-B: 설정일 수집 (네이버 금융) ──")
 
-    cache_file = os.path.join(Config.CACHE_DIR, "listing_dates_v7.pkl")
+    cache_file = os.path.join(Config.CACHE_DIR, "listing_dates_v8.pkl")
     cached = {}
     if Config.USE_CACHE and os.path.exists(cache_file):
         try:
@@ -861,6 +869,15 @@ def _parse_date_str(raw):
     if re.fullmatch(r'\d{8}', s):
         try:
             dt = datetime.strptime(s, '%Y%m%d')
+            if 1990 <= dt.year <= 2030:
+                return dt.strftime('%Y-%m-%d')
+        except ValueError:
+            pass
+    # YYYY년 M월 D일 (네이버 main.naver '상장일' 형식)
+    m = re.search(r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일', s)
+    if m:
+        try:
+            dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
             if 1990 <= dt.year <= 2030:
                 return dt.strftime('%Y-%m-%d')
         except ValueError:
@@ -934,6 +951,7 @@ def _naver_listing_dates(tickers):
 
     def fetch(ticker):
         # 방법 1: 네이버 ETF 상세 페이지 스크래핑
+        # main.naver 확인: '상장일' 키워드 + 'YYYY년 MM월 DD일' 형식
         for page in ('main', 'etfinfo'):
             try:
                 if page == 'main':
@@ -942,20 +960,29 @@ def _naver_listing_dates(tickers):
                     url = f"https://finance.naver.com/item/etfinfo.naver?code={ticker}"
                 req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                 raw = urlopen(req, timeout=5).read()
-                # EUC-KR 디코딩 (네이버 금융 페이지는 EUC-KR)
                 try:
-                    html = raw.decode('euc-kr')
+                    html = raw.decode('utf-8')
                 except (UnicodeDecodeError, LookupError):
-                    html = raw.decode('utf-8', errors='ignore')
+                    try:
+                        html = raw.decode('euc-kr')
+                    except (UnicodeDecodeError, LookupError):
+                        html = raw.decode('utf-8', errors='ignore')
 
-                # 다양한 패턴 시도 (점/슬래시/대시 구분자 모두)
+                # 패턴 목록 (확인된 실제 형식 우선)
                 patterns = [
-                    r'설정일\s*</th>\s*<td[^>]*>\s*(\d{4}[.\-/]\d{2}[.\-/]\d{2})',
-                    r'설정일\s*</td>\s*<td[^>]*>\s*(\d{4}[.\-/]\d{2}[.\-/]\d{2})',
-                    r'설정일\s*[^<\d]*(\d{4}[.\-/]\d{2}[.\-/]\d{2})',
+                    # 네이버 main.naver: '상장일' + 'YYYY년 MM월 DD일'
+                    r'상장일\s*[^<\d]*(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)',
+                    r'상장일\s*</th>\s*<td[^>]*>\s*(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)',
+                    r'상장일\s*</dt>\s*<dd[^>]*>\s*(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)',
+                    # 설정일 (한국어 날짜 형식)
+                    r'설정일\s*[^<\d]*(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)',
+                    # 기존 점/슬래시/대시 형식 (하위 호환)
                     r'상장일\s*</th>\s*<td[^>]*>\s*(\d{4}[.\-/]\d{2}[.\-/]\d{2})',
                     r'상장일\s*[^<\d]*(\d{4}[.\-/]\d{2}[.\-/]\d{2})',
-                    r'list_dt["\s:]+(\d{8})',           # JSON-in-HTML (YYYYMMDD)
+                    r'설정일\s*</th>\s*<td[^>]*>\s*(\d{4}[.\-/]\d{2}[.\-/]\d{2})',
+                    r'설정일\s*[^<\d]*(\d{4}[.\-/]\d{2}[.\-/]\d{2})',
+                    # JSON-in-HTML (YYYYMMDD)
+                    r'list_dt["\s:]+(\d{8})',
                     r'listDt["\s:]+(\d{8})',
                     r'listingDate["\s:]+(\d{8})',
                 ]
@@ -1435,14 +1462,14 @@ def step5_save(df, df_close, df_pdf, base_date):
             cap = sub['시가총액(억원)'].sum() if '시가총액(억원)' in sub.columns else 0
             print(f"    {cat}: {len(sub)}개 ({cap:,.0f}억)")
 
-    cols = ['ETF명', '시가총액(억원)', 'NAV(억원)', '설정일',
+    cols = ['ETF명', '시가총액(억원)', '종가', '설정일',
             '대카테고리', '중카테고리', '소카테고리',
             '순위(YTD_BM+)',
             '수익률_1M(%)', '수익률_3M(%)', '수익률_6M(%)',
             '수익률_1Y(%)', '수익률_YTD(%)',
             'BM_1M(%)', 'BM_3M(%)', 'BM_6M(%)',
             'BM_1Y(%)', 'BM_YTD(%)',
-            '연간변동성(%)', '종가', '거래량']
+            '연간변동성(%)', '거래량(주)', '거래대금(억)']
 
     cols = [c for c in cols if c in df.columns]
     df_export = df[cols].copy().fillna('')
