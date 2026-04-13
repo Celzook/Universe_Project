@@ -258,21 +258,23 @@ def page_universe():
 
     # ── [기능4] 테이블 컬럼 순서: ETF명 → 시가총액 → 설정일 ──
     display_cols = [c for c in [
-        'ETF명','시가총액(억원)','NAV(억원)','설정일',
+        'ETF명','시가총액(억원)','종가','설정일',
         '대카테고리','중카테고리','소카테고리','순위(YTD_BM+)',
         '수익률_1M(%)','수익률_3M(%)','수익률_6M(%)','수익률_1Y(%)','수익률_YTD(%)',
         'BM_1M(%)','BM_3M(%)','BM_6M(%)','BM_1Y(%)','BM_YTD(%)',
-        '연간변동성(%)','종가','거래량'
+        '연간변동성(%)','거래량(주)','거래대금(억)'
     ] if c in df.columns]
 
     # 천단위 콤마 포맷 — Pandas Styler 사용 (Streamlit NumberColumn은 printf만 지원하므로)
     df_display = df[display_cols].copy()
     # 숫자 컬럼 dtype 보장
-    for col in ['시가총액(억원)', 'NAV(억원)', '종가', '거래량']:
+    for col in ['시가총액(억원)', '종가', '거래량(주)', '거래대금(억)']:
         if col in df_display.columns:
             df_display[col] = pd.to_numeric(df_display[col], errors='coerce')
     # Styler로 포맷 (천단위 콤마 + NaN은 빈 문자열)
-    fmt_dict = {c: '{:,.0f}' for c in ['시가총액(억원)', 'NAV(억원)', '종가', '거래량'] if c in df_display.columns}
+    fmt_dict = {c: '{:,.0f}' for c in ['시가총액(억원)', '종가', '거래량(주)'] if c in df_display.columns}
+    if '거래대금(억)' in df_display.columns:
+        fmt_dict['거래대금(억)'] = '{:,.1f}'
     styled = df_display.style.format(fmt_dict, na_rep='', precision=2)
     st.dataframe(styled, width='stretch', height=500)
 
@@ -553,9 +555,9 @@ def _render_kr_tab(kr_close, df_uni, start_date, end_date):
         if '시가총액(억원)' in uni_vt.columns and not uni_vt.empty:
             presets['시총 Top 10'] = _make_preset(
                 uni_vt.nlargest(10, '시가총액(억원)').index.tolist())
-        if '거래량' in uni_vt.columns and not uni_vt.empty:
+        if '거래량(주)' in uni_vt.columns and not uni_vt.empty:
             presets['거래량 Top 10'] = _make_preset(
-                uni_vt.nlargest(10, '거래량').index.tolist())
+                uni_vt.nlargest(10, '거래량(주)').index.tolist())
         if 'BM_YTD(%)' in uni_vt.columns and not uni_vt.empty:
             presets['BM 상위 10'] = _make_preset(
                 uni_vt.nlargest(10, 'BM_YTD(%)').index.tolist())
@@ -755,4 +757,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
