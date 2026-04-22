@@ -237,18 +237,14 @@ def page_universe():
     df_pdf = st.session_state.df_pdf
     has_cap = '시가총액(억원)' in df.columns and df['시가총액(억원)'].notna().any()
 
-    # 초과성과 컬럼 사전 계산
-    for _period, _ret_col, _bm_col in [
-        ('1M',  '수익률_1M(%)',  'BM_1M(%)'),
-        ('3M',  '수익률_3M(%)',  'BM_3M(%)'),
-        ('6M',  '수익률_6M(%)',  'BM_6M(%)'),
-        ('YTD', '수익률_YTD(%)', 'BM_YTD(%)'),
-    ]:
-        if _ret_col in df.columns and _bm_col in df.columns:
-            df[f'초과성과_{_period}(%)'] = (
-                pd.to_numeric(df[_ret_col], errors='coerce') -
-                pd.to_numeric(df[_bm_col], errors='coerce')
-            ).astype('float32')
+    # BM_X(%) 컬럼은 이미 "ETF수익률 - KOSPI BM" 값 (= 초과성과)
+    # 별도 계산 없이 BM_X(%) 컬럼을 직접 초과성과로 사용
+    _period_to_col = {
+        '1M':  'BM_1M(%)',
+        '3M':  'BM_3M(%)',
+        '6M':  'BM_6M(%)',
+        'YTD': 'BM_YTD(%)',
+    }
 
     # 필터
     col1, col2, col3 = st.columns(3)
@@ -315,7 +311,7 @@ def page_universe():
         horizontal=True,
         key="uni_period_sel"
     )
-    excess_col = f'초과성과_{period_sel}(%)'
+    excess_col = _period_to_col.get(period_sel, 'BM_YTD(%)')
 
     # 카테고리별 BM 대비 초과성과 바
     if excess_col in df.columns and '중카테고리' in df.columns:
@@ -339,10 +335,9 @@ def page_universe():
     # BM 초과성과 상위/하위 15
     if excess_col in df.columns and len(df) > 0:
         st.subheader(f"📈 BM 대비 초과성과 상위/하위 15 ({period_sel})")
-        excess_cols_all = [c for c in [
-            '초과성과_1M(%)', '초과성과_3M(%)', '초과성과_6M(%)', '초과성과_YTD(%)'
-        ] if c in df.columns]
-        top_cols = ['ETF명', '중카테고리'] + excess_cols_all
+        all_bm_cols = [c for c in ['BM_1M(%)', 'BM_3M(%)', 'BM_6M(%)', 'BM_YTD(%)']
+                       if c in df.columns]
+        top_cols = ['ETF명', '중카테고리'] + all_bm_cols
         if has_cap:
             top_cols.insert(2, '시가총액(억원)')
         valid_df = df[df[excess_col].notna()]
