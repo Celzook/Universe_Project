@@ -18,6 +18,11 @@ from etf_universe_builder import build_universe, Config, diagnose
 from global_price_collector import (
     collect_global_prices, calc_period_return, GLOBAL_INDICES, US_ETFS
 )
+try:
+    from page_etf_uniview import page_etf_uniview
+    _HAS_UNIVIEW = True
+except ImportError:
+    _HAS_UNIVIEW = False
 
 
 # ============================================================================
@@ -141,8 +146,10 @@ def render_sidebar():
     if st.sidebar.button("🩺 KRX 연결 진단", width='stretch'):
         run_diagnosis()
     st.sidebar.markdown("---")
-    return st.sidebar.radio("📌 메뉴", ["유니버스 탐색", "구성종목(PDF) 분석", "수익률 비교"],
-                            label_visibility="collapsed")
+    menu_items = ["유니버스 탐색", "구성종목(PDF) 분석", "수익률 비교"]
+    if _HAS_UNIVIEW:
+        menu_items.append("🔭 ETF Uniview")
+    return st.sidebar.radio("📌 메뉴", menu_items, label_visibility="collapsed")
 
 def run_universe_build(min_cap, top_n):
     with st.spinner("유니버스 빌드 중... (첫 실행 3~8분, 이후 캐시)"):
@@ -230,6 +237,19 @@ def page_universe():
     df_pdf = st.session_state.df_pdf
     has_cap = '시가총액(억원)' in df.columns and df['시가총액(억원)'].notna().any()
 
+    # 초과성과 컬럼 사전 계산
+    for _period, _ret_col, _bm_col in [
+        ('1M',  '수익률_1M(%)',  'BM_1M(%)'),
+        ('3M',  '수익률_3M(%)',  'BM_3M(%)'),
+        ('6M',  '수익률_6M(%)',  'BM_6M(%)'),
+        ('YTD', '수익률_YTD(%)', 'BM_YTD(%)'),
+    ]:
+        if _ret_col in df.columns and _bm_col in df.columns:
+            df[f'초과성과_{_period}(%)'] = (
+                pd.to_numeric(df[_ret_col], errors='coerce') -
+                pd.to_numeric(df[_bm_col], errors='coerce')
+            ).astype('float32')
+
     # 필터
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -286,29 +306,55 @@ def page_universe():
         sel_tickers = [s.split(' | ')[0] for s in selected]
         render_pdf_comparison(sel_tickers, df_pdf, df, key_prefix="uni")
 
-    # 카테고리별 시가총액 바
-    if has_cap:
-        st.markdown("---")
-        st.subheader("📊 카테고리별 시가총액")
-        cc = df.groupby('대카테고리')['시가총액(억원)'].sum().sort_values(ascending=True)
-        fig = px.bar(x=cc.values, y=cc.index, orientation='h', labels={'x':'시총(억)','y':''},
-                    color=cc.values, color_continuous_scale='Viridis')
-        fig.update_layout(height=350, showlegend=False, coloraxis_showscale=False,
-                        margin=dict(l=0,r=0,t=30,b=0))
+    # 기간 선택 + 초과성과 차트/테이블
+    st.markdown("---")
+    period_sel = st.radio(
+        "📅 초과성과 기준 기간",
+        ["1M", "3M", "6M", "YTD"],
+        index=3,
+        horizontal=True,
+        key="uni_period_sel"
+    )
+    excess_col = f'초과성과_{period_sel}(%)'
+
+    # 카테고리별 BM 대비 초과성과 바
+    if excess_col in df.columns and '중카테고리' in df.columns:
+        st.subheader(f"📊 카테고리별 BM 대비 초과성과 (중카테고리, {period_sel})")
+        cat_excess = df.groupby('중카테고리')[excess_col].mean().sort_values(ascending=True)
+        bar_colors = ['#2ecc71' if v >= 0 else '#e74c3c' for v in cat_excess.values]
+        fig = go.Figure(go.Bar(
+            x=cat_excess.values, y=cat_excess.index, orientation='h',
+            marker_color=bar_colors,
+            text=[f"{v:+.2f}%" for v in cat_excess.values],
+            textposition='outside'
+        ))
+        fig.update_layout(
+            height=max(400, len(cat_excess) * 22),
+            showlegend=False,
+            xaxis_title="평균 초과성과(%)",
+            margin=dict(l=0, r=80, t=30, b=0)
+        )
         st.plotly_chart(fig, width='stretch')
 
-    # BM 상위/하위
-    if 'BM_YTD(%)' in df.columns and len(df) > 0:
-        st.subheader("📈 BM(YTD) 상위/하위 15")
-        top_cols = ['ETF명','대카테고리','BM_YTD(%)','수익률_YTD(%)']
-        if has_cap: top_cols.insert(1, '시가총액(억원)')
+    # BM 초과성과 상위/하위 15
+    if excess_col in df.columns and len(df) > 0:
+        st.subheader(f"📈 BM 대비 초과성과 상위/하위 15 ({period_sel})")
+        excess_cols_all = [c for c in [
+            '초과성과_1M(%)', '초과성과_3M(%)', '초과성과_6M(%)', '초과성과_YTD(%)'
+        ] if c in df.columns]
+        top_cols = ['ETF명', '중카테고리'] + excess_cols_all
+        if has_cap:
+            top_cols.insert(2, '시가총액(억원)')
+        valid_df = df[df[excess_col].notna()]
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("**🟢 상위**")
-            st.dataframe(df.nlargest(15,'BM_YTD(%)')[top_cols].reset_index(), width='stretch', hide_index=True)
+            st.markdown(f"**🟢 초과성과 상위 15 ({period_sel})**")
+            st.dataframe(valid_df.nlargest(15, excess_col)[top_cols].reset_index(),
+                         width='stretch', hide_index=True)
         with c2:
-            st.markdown("**🔴 하위**")
-            st.dataframe(df.nsmallest(15,'BM_YTD(%)')[top_cols].reset_index(), width='stretch', hide_index=True)
+            st.markdown(f"**🔴 초과성과 하위 15 ({period_sel})**")
+            st.dataframe(valid_df.nsmallest(15, excess_col)[top_cols].reset_index(),
+                         width='stretch', hide_index=True)
 
     # 도넛차트 맨 아래
     if '대카테고리' in df.columns:
@@ -754,6 +800,7 @@ def main():
     if page == "유니버스 탐색": page_universe()
     elif page == "구성종목(PDF) 분석": page_pdf()
     elif page == "수익률 비교": page_returns()
+    elif page == "🔭 ETF Uniview" and _HAS_UNIVIEW: page_etf_uniview()
 
 if __name__ == "__main__":
     main()
