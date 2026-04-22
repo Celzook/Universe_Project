@@ -316,21 +316,42 @@ def page_universe():
     # 카테고리별 BM 대비 초과성과 바
     if excess_col in df.columns and '중카테고리' in df.columns:
         st.subheader(f"📊 카테고리별 BM 대비 초과성과 (중카테고리, {period_sel})")
-        cat_excess = df.groupby('중카테고리')[excess_col].mean().sort_values(ascending=True)
-        bar_colors = ['#2ecc71' if v >= 0 else '#e74c3c' for v in cat_excess.values]
-        fig = go.Figure(go.Bar(
-            x=cat_excess.values, y=cat_excess.index, orientation='h',
-            marker_color=bar_colors,
-            text=[f"{v:+.2f}%" for v in cat_excess.values],
-            textposition='outside'
-        ))
-        fig.update_layout(
-            height=max(400, len(cat_excess) * 22),
-            showlegend=False,
-            xaxis_title="평균 초과성과(%)",
-            margin=dict(l=0, r=80, t=30, b=0)
+        # NaN·빈문자열 제외 후 그룹 평균
+        _df_cat = df[df['중카테고리'].notna() & (df['중카테고리'] != '')]
+        cat_excess = (
+            _df_cat.groupby('중카테고리')[excess_col]
+            .mean()
+            .dropna()
+            .sort_values(ascending=True)
         )
-        st.plotly_chart(fig, width='stretch')
+        if cat_excess.empty:
+            st.caption("초과성과 데이터가 없습니다. (BM 데이터 미수집)")
+        else:
+            bar_colors = ['#2ecc71' if float(v) >= 0 else '#e74c3c' for v in cat_excess.values]
+            fig = go.Figure(go.Bar(
+                x=cat_excess.values.astype(float),
+                y=cat_excess.index.tolist(),
+                orientation='h',
+                marker_color=bar_colors,
+                text=[f"{float(v):+.2f}%" for v in cat_excess.values],
+                textposition='outside'
+            ))
+            fig.update_layout(
+                height=max(400, len(cat_excess) * 24),
+                showlegend=False,
+                xaxis_title="평균 초과성과(%)",
+                margin=dict(l=0, r=80, t=30, b=0)
+            )
+            st.plotly_chart(fig, width='stretch')
+    else:
+        # 디버그: 조건 실패 사유 표시
+        missing = []
+        if excess_col not in df.columns:
+            missing.append(f"'{excess_col}' 컬럼 없음")
+        if '중카테고리' not in df.columns:
+            missing.append("'중카테고리' 컬럼 없음")
+        if missing:
+            st.caption(f"카테고리 차트 표시 불가: {', '.join(missing)}")
 
     # BM 초과성과 상위/하위 15
     if excess_col in df.columns and len(df) > 0:

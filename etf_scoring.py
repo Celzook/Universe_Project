@@ -206,6 +206,66 @@ def compute_C_score(T_score: float, M_score: float) -> float:
 # ─── OHLCV fetchers ────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600 * 2, show_spinner=False)
+def fetch_kr_ohlcv_batch(tickers: tuple, months: int = 6) -> dict:
+    """
+    Batch-fetch OHLCV for Korean ETFs via yfinance (appends .KS suffix).
+    Returns dict {original_ticker: DataFrame(Open,High,Low,Close,Volume)}.
+    """
+    kr_tickers = [f"{t}.KS" for t in tickers]
+    ticker_map = {f"{t}.KS": t for t in tickers}
+    end = datetime.today()
+    start = end - timedelta(days=months * 31)
+    result = {}
+    try:
+        raw = yf.download(kr_tickers, start=start, end=end,
+                          progress=False, auto_adjust=True)
+        if raw.empty:
+            return result
+        for kr_t in kr_tickers:
+            orig = ticker_map[kr_t]
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    lvl1 = raw.columns.get_level_values(1)
+                    if kr_t in lvl1:
+                        df_t = raw.xs(kr_t, axis=1, level=1).copy()
+                    else:
+                        continue
+                else:
+                    df_t = raw.copy()
+                df_t.index = pd.to_datetime(df_t.index)
+                if not df_t.empty and 'Close' in df_t.columns:
+                    result[orig] = df_t
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return result
+
+
+@st.cache_data(ttl=3600 * 2, show_spinner=False)
+def score_all_kr_etfs(all_tickers: tuple) -> pd.DataFrame:
+    """Score Korean ETFs using .KS yfinance data."""
+    macro = fetch_macro_scores()
+    M_score = macro['M_score']
+    ohlcv_dict = fetch_kr_ohlcv_batch(all_tickers, months=6)
+    rows = []
+    for ticker in all_tickers:
+        df_t = ohlcv_dict.get(ticker, pd.DataFrame())
+        if df_t.empty or 'Close' not in df_t.columns:
+            rows.append({'ticker': ticker, 'T_score': np.nan, 'C_score': np.nan})
+            continue
+        close = df_t['Close'].squeeze().dropna()
+        T = compute_T_score(close)
+        C = compute_C_score(T, M_score)
+        rows.append({
+            'ticker': ticker,
+            'T_score': round(T, 2) if not np.isnan(T) else np.nan,
+            'C_score': round(C, 2) if not np.isnan(C) else np.nan,
+        })
+    return pd.DataFrame(rows).set_index('ticker')
+
+
+@st.cache_data(ttl=3600 * 2, show_spinner=False)
 def fetch_ohlcv_batch(tickers: tuple, months: int = 3) -> dict:
     """
     Batch-fetch OHLCV for multiple tickers via one yfinance call.
