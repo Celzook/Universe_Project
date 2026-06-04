@@ -9,10 +9,14 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import gc, traceback
+import gc, traceback, io
 
 st.set_page_config(page_title="ETF Universe Explorer", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
+
+# 한국식 색상 컨벤션 (상승=빨강, 하락=파랑) — 차트 전반에 일관 적용
+UP_COLOR   = '#e74c3c'   # 빨강 (상승/양수)
+DOWN_COLOR = '#3498db'   # 파랑 (하락/음수)
 
 from etf_universe_builder import build_universe, Config, diagnose
 from global_price_collector import (
@@ -258,11 +262,16 @@ def page_universe():
             mids = ['전체'] + sorted(df['중카테고리'].dropna().unique().tolist()) if '중카테고리' in df.columns else ['전체']
         sel_mid = st.selectbox("중카테고리", mids)
     with col3:
-        search = st.text_input("🔍 ETF명 검색")
+        search = st.text_input("🔍 ETF명 / 티커 검색", placeholder="예: 미국나스닥 또는 069500")
 
     if sel_cat != '전체': df = df[df['대카테고리'] == sel_cat]
     if sel_mid != '전체': df = df[df['중카테고리'] == sel_mid]
-    if search: df = df[df['ETF명'].str.contains(search, case=False, na=False)]
+    if search:
+        s = search.strip()
+        # ETF명 또는 인덱스(티커) 매칭 — 대소문자/공백 무시
+        name_mask = df['ETF명'].str.contains(s, case=False, na=False)
+        ticker_mask = df.index.astype(str).str.contains(s, case=False, na=False)
+        df = df[name_mask | ticker_mask]
 
     # 메트릭
     m1, m2, m3, m4 = st.columns(4)
@@ -293,6 +302,17 @@ def page_universe():
         fmt_dict['거래대금(억)'] = '{:,.1f}'
     styled = df_display.style.format(fmt_dict, na_rep='', precision=2)
     st.dataframe(styled, width='stretch', height=500)
+
+    # CSV 다운로드 (현재 필터 적용된 결과)
+    csv_buf = io.StringIO()
+    df_display.to_csv(csv_buf, encoding='utf-8-sig', index=True)
+    st.download_button(
+        label=f"📥 CSV 다운로드 ({len(df_display)}개 ETF)",
+        data=csv_buf.getvalue().encode('utf-8-sig'),
+        file_name=f"etf_universe_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime='text/csv',
+        key='uni_csv_dl',
+    )
 
     # ETF 선택 → PDF 비교
     etf_options = [f"{t} | {df.at[t,'ETF명'][:30]}" for t in df.index]
@@ -327,7 +347,7 @@ def page_universe():
         if cat_excess.empty:
             st.caption("초과성과 데이터가 없습니다. (BM 데이터 미수집)")
         else:
-            bar_colors = ['#2ecc71' if float(v) >= 0 else '#e74c3c' for v in cat_excess.values]
+            bar_colors = [UP_COLOR if float(v) >= 0 else DOWN_COLOR for v in cat_excess.values]
             fig = go.Figure(go.Bar(
                 x=cat_excess.values.astype(float),
                 y=cat_excess.index.tolist(),
@@ -487,7 +507,7 @@ def _render_stock_analysis_charts(chart_data, stock_name, df_uni):
     with col1:
         fig1 = go.Figure(go.Bar(
             x=chart_data[stock_name].values, y=labels, orientation='h',
-            marker_color='#3498db',
+            marker_color=UP_COLOR,
             text=[f"{v:.1f}%" for v in chart_data[stock_name].values],
             textposition='outside'
         ))
@@ -796,7 +816,7 @@ def _draw_return_bar(df_prices, start_date, end_date, title, name_map=None):
     else:
         labels = ret.index.tolist()
     rd = ret.copy(); rd.index = labels; rs = rd.sort_values(ascending=True)
-    colors = ['#2ecc71' if v>=0 else '#e74c3c' for v in rs.values]
+    colors = [UP_COLOR if v>=0 else DOWN_COLOR for v in rs.values]
     fig = go.Figure(go.Bar(x=rs.values, y=rs.index, orientation='h', marker_color=colors,
                            text=[f"{v:+.2f}%" for v in rs.values], textposition='outside'))
     fig.update_layout(title=f"{title} 수익률 ({start_date}~{end_date})",

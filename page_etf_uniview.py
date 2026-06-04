@@ -214,11 +214,12 @@ def page_etf_uniview():
     ticker_to_cat  = dict(zip(pool_tickers, pool_cats))
 
     pool_options = [f"{t} | {n[:28]}" for t, n in zip(pool_tickers, pool_names)]
-    default_opts = pool_options[:MAX_SELECT]  # 시총 상위 20개 기본 선택
+    # 첫 진입 시 시총 Top 5만 기본 — 20개 자동 로드로 인한 yfinance 폭주 방지
+    default_opts = pool_options[:5]
 
     st.caption(
         f"국내 상장 ETF 유니버스 {len(pool_tickers)}개 | "
-        "최대 20개 선택 → 5×4 그리드 | "
+        f"최대 {MAX_SELECT}개 선택 → 5×4 그리드 (빈 칸은 placeholder) | "
         "차트에서 **마우스 휠**: 시계열 줌 / **드래그**: 이동"
     )
 
