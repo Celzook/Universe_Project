@@ -89,15 +89,32 @@ class Config:
 _NAVER_ETF_CACHE = {}   # 메모리 캐시: {date_key: DataFrame}
 
 
-def _http_get(url, headers=None, timeout=10, encoding=None):
-    """범용 HTTP GET — requests 우선, urllib fallback
+def _http_get(url, headers=None, timeout=10, encoding=None, retries=2, backoff=0.4):
+    """범용 HTTP GET — requests 우선, urllib fallback.
+    재시도: 일시적 네트워크 오류(타임아웃/5xx) 시 exponential backoff + jitter.
+
     encoding=None: 자동 감지 (네이버 금융은 EUC-KR, 차트 API는 UTF-8)
-    encoding='euc-kr' 등 명시 시: 해당 인코딩 사용
     """
+    import random
     hdr = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                           'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
     if headers:
         hdr.update(headers)
+
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return _http_get_once(url, hdr, timeout, encoding)
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                # exponential backoff + jitter (0.4, 0.8, 1.6 ... + 0~0.3s)
+                time.sleep(backoff * (2 ** attempt) + random.uniform(0, 0.3))
+    raise last_err
+
+
+def _http_get_once(url, hdr, timeout, encoding):
+    """단일 GET — _http_get의 내부 구현 (재시도 로직 분리)"""
     if HAS_REQUESTS:
         resp = _requests_lib.get(url, headers=hdr, timeout=timeout)
         resp.raise_for_status()
@@ -136,24 +153,36 @@ def _http_get(url, headers=None, timeout=10, encoding=None):
                 return raw.decode('euc-kr', errors='ignore')
 
 
-def _http_post(url, data, headers=None, timeout=10):
-    """범용 HTTP POST — requests 우선, urllib fallback"""
+def _http_post(url, data, headers=None, timeout=10, retries=2, backoff=0.4):
+    """범용 HTTP POST — requests 우선, urllib fallback.
+    재시도: 일시적 네트워크 오류 시 exponential backoff + jitter.
+    """
+    import random
     hdr = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                           'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
            'Content-Type': 'application/x-www-form-urlencoded',
            'Referer': 'http://data.krx.co.kr/contents/MDC/MDI/mdiStat/standard/MDCSTAT05901.cmd'}
     if headers:
         hdr.update(headers)
-    if HAS_REQUESTS:
-        resp = _requests_lib.post(url, data=data, headers=hdr, timeout=timeout)
-        resp.raise_for_status()
-        return resp.text
-    else:
-        from urllib.parse import urlencode
-        body = urlencode(data).encode('utf-8')
-        req = Request(url, data=body, headers=hdr)
-        with urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode('utf-8', errors='ignore')
+
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            if HAS_REQUESTS:
+                resp = _requests_lib.post(url, data=data, headers=hdr, timeout=timeout)
+                resp.raise_for_status()
+                return resp.text
+            else:
+                from urllib.parse import urlencode
+                body = urlencode(data).encode('utf-8')
+                req = Request(url, data=body, headers=hdr)
+                with urlopen(req, timeout=timeout) as resp:
+                    return resp.read().decode('utf-8', errors='ignore')
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(backoff * (2 ** attempt) + random.uniform(0, 0.3))
+    raise last_err
 
 
 # ──────────────────────────────────────────────────────────
