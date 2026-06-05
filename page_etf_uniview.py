@@ -30,6 +30,8 @@ from momentum_funnel import (
     compute_hot_metrics, build_mp,
     EXCLUDED_CATEGORIES_DEFAULT,
     CORE_TICKER_DEFAULT, CORE_NAME_DEFAULT,
+    save_mp_local, load_mp, delete_mp,
+    push_to_github, compute_mp_performance,
 )
 
 GRID_COLS = 5
@@ -62,6 +64,89 @@ def _cached_hot_run(base_date: str, n_etfs: int, max_members: int):
     meta_tickers = {s: market.meta.get(s, {}).get('tickers', []) for s in hot_metrics.index}
     asof = market.common_index[-1] if len(market.common_index) else None
     return hot_metrics, meta_tickers, asof
+
+
+def _saved_mp_section():
+    """📌 저장된 MP — 편입일 기준 forward 성과 추적. 없으면 무음 종료."""
+    saved = load_mp()
+    if not saved:
+        return  # 저장본 없음 → 섹션 자체 미표시
+
+    st.subheader("📌 저장된 MP — 편입일 기준 성과 추적")
+    inception = saved.get('inception_date', '?')
+    method = saved.get('method', '?')
+    saved_at = saved.get('saved_at', '?')
+    n_pos = len(saved.get('positions', []))
+
+    c0, c1, c2, c3 = st.columns([1.3, 1.0, 1.0, 0.9])
+    c0.metric("편입일", inception)
+    c1.metric("방법", method)
+    c2.metric("포지션", n_pos)
+    with c3:
+        st.caption(f"저장일시\n{saved_at}")
+        if st.button("🗑️ 삭제", key='saved_mp_delete', help="저장된 MP 제거 (로컬만, GitHub 파일은 별도)"):
+            if delete_mp():
+                st.success("삭제됨. 페이지 새로고침으로 갱신.")
+                st.rerun()
+
+    # 가격·KOSPI fetch 어댑터
+    try:
+        from etf_universe_builder import naver_get_price_history, naver_get_index_history
+    except Exception as e:
+        st.error(f"가격 어댑터 로드 실패: {e}")
+        return
+
+    def _fetch_close(t, s, e):
+        return naver_get_price_history(t, s, e)
+    def _fetch_kospi(s, e):
+        return naver_get_index_history('KOSPI', s, e)
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _cached_perf(inception_key: str, tickers_key: tuple):
+        return compute_mp_performance(saved, _fetch_close, _fetch_kospi)
+
+    with st.spinner("📡 저장 MP 성과 계산 (편입일 기준 forward)..."):
+        try:
+            tickers_key = tuple(str(p.get('ticker','')) for p in saved.get('positions', []))
+            perf = _cached_perf(inception, tickers_key)
+        except Exception as e:
+            st.error(f"성과 계산 실패: {e}")
+            return
+
+    if perf.empty:
+        st.info("성과 산출 결과가 없습니다.")
+    else:
+        # 포트폴리오 누적 (시작비중 가중)
+        port_cum = (perf['시작비중%'] / 100.0 * perf['누적%'].fillna(0)).sum()
+        st.metric("포트폴리오 누적 초과수익률 (KOSPI 대비)", f"{port_cum:+.2f}%")
+
+        # 표시용 정수·소수점
+        view = perf.copy()
+        for c in ['시작비중%','현재비중%']:
+            view[c] = view[c].astype(float).round(2)
+        for c in ['누적%','+1D','+1W','+1M','+3M','YTD']:
+            view[c] = view[c].astype(float).round(2)
+
+        st.dataframe(
+            view, width='stretch', hide_index=True, height=420,
+            column_config={
+                '시작비중%': st.column_config.NumberColumn('시작 비중', format='%.2f%%'),
+                '현재비중%': st.column_config.ProgressColumn(
+                    '현재 비중 (drift)', min_value=0.0, max_value=100.0, format='%.2f%%',
+                ),
+                '누적%': st.column_config.NumberColumn('누적 초과 %', format='%+.2f'),
+                '+1D':  st.column_config.NumberColumn('+1D %', format='%+.2f'),
+                '+1W':  st.column_config.NumberColumn('+1W %', format='%+.2f'),
+                '+1M':  st.column_config.NumberColumn('+1M %', format='%+.2f'),
+                '+3M':  st.column_config.NumberColumn('+3M %', format='%+.2f'),
+                'YTD':  st.column_config.NumberColumn('YTD %',  format='%+.2f'),
+            },
+        )
+        st.caption("**해석**: 모든 수익률은 KOSPI 초과 (ETF − KOSPI). "
+                   "**현재 비중**은 편입일 이후 가격 변화 반영한 buy-and-hold drift (합=100). "
+                   "Forward 윈도우 (+1D/+1W/+1M/+3M)는 편입일 이후 해당 영업일 도달 시점 시점, 미도달 시 NaN.")
+
+    st.markdown("---")
 
 
 _HOT_HELP = """
@@ -180,17 +265,32 @@ def _hot_board_section(df_uni: pd.DataFrame):
                     ),
                 },
             )
-            # CSV 다운로드
+            # CSV 다운로드 + MP 저장 버튼 가로 배치
             import io
             buf = io.StringIO()
             disp.to_csv(buf, encoding='utf-8-sig', index=False)
-            st.download_button(
-                label=f"📥 MP {label} CSV",
-                data=buf.getvalue().encode('utf-8-sig'),
-                file_name=f"mp_{label}_{asof_str}.csv",
-                mime='text/csv',
-                key=f'mp_csv_{label}',
-            )
+            bc1, bc2 = st.columns(2)
+            with bc1:
+                st.download_button(
+                    label=f"📥 MP {label} CSV",
+                    data=buf.getvalue().encode('utf-8-sig'),
+                    file_name=f"mp_{label}_{asof_str}.csv",
+                    mime='text/csv',
+                    key=f'mp_csv_{label}',
+                )
+            with bc2:
+                if st.button(f"💾 MP {label} 저장", key=f'mp_save_{label}',
+                             help="현재 MP를 편입일 기준으로 LOCK IN (덮어쓰기, GitHub 자동 커밋 시도)"):
+                    try:
+                        path, payload = save_mp_local(df_mp, inception_date=asof_str, method=label)
+                        st.success(f"✅ 저장: `{path}` (편입일 {asof_str}, 방법 {label})")
+                        ok, msg = push_to_github(payload)
+                        if ok:
+                            st.info(f"🔄 GitHub 동기화: {msg} — Streamlit Cloud는 자동 재배포 후 영구 반영")
+                        else:
+                            st.warning(f"🔒 GitHub 미동기화 (로컬만 저장됨): {msg}")
+                    except Exception as e:
+                        st.error(f"저장 실패: {e}")
 
         with tab_a:
             st.caption("HotScore 상위 N개 직접 선택")
@@ -371,7 +471,10 @@ def page_etf_uniview():
         st.warning("유니버스 데이터가 없습니다. 다시 빌드해 주세요.")
         return
 
-    # ── 🔥 Hot Sectors + Model Portfolio (최상단) ───────────────────────────
+    # ── 📌 저장된 MP (편입일 기준 성과 추적) — 저장본 있을 때만 표시 ──────
+    _saved_mp_section()
+
+    # ── 🔥 Hot Sectors + Live MP ────────────────────────────────────────────
     _hot_board_section(df_uni)
 
     # ── ETF 풀: 국내 유니버스 (시총 상위 순 정렬) ──────────────────────────
