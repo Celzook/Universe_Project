@@ -359,6 +359,40 @@ class TestMinBarsFilter(unittest.TestCase):
                       "충분한 데이터가 있음에도 섹터가 스킵됨")
         self.assertNotIn('skipped', md.meta.get('반도체', {}))
 
+    def test_short_sector_does_not_kill_long_sectors(self):
+        """
+        회귀: 신규 상장 ETF 1개가 들어간 섹터(짧은 history) 때문에
+        다른 정상 섹터들이 함께 죽으면 안 된다.
+        (구버그: len(common_index) 기준이라 한 섹터가 짧으면 전체 cascade drop)
+        """
+        idx_long  = pd.bdate_range(end='2024-06-30', periods=N)
+        idx_short = pd.bdate_range(end='2024-06-30', periods=10)
+        # bench 는 풍부한 이력
+        bench = _make_bench_series(N, idx=idx_long)
+
+        # 3개 섹터: 2개 정상(60바), 1개 신규(10바)
+        df_univ = _make_universe({
+            '정상A': ['A1'], '정상B': ['B1'], '신규C': ['C1'],
+        })
+        long_ohlcv  = _make_ohlcv(N, idx=idx_long,  seed=10)
+        short_ohlcv = _make_ohlcv(10, idx=idx_short, seed=11)
+
+        def mock_ohlcv(ticker, *args, **kwargs):
+            return short_ohlcv if ticker == 'C1' else long_ohlcv
+
+        cfg = FunnelConfig()  # min_bars = 33
+
+        with patch('momentum_funnel.data_adapter.naver_get_ohlcv_history', side_effect=mock_ohlcv), \
+             patch('momentum_funnel.data_adapter.naver_get_index_history', return_value=bench):
+            src = UniverseDataSource(df_univ, cfg=cfg, use_yf_fallback=False)
+            md = src.load()
+
+        # 신규C 만 drop, 정상A·B 는 살아있어야 한다
+        self.assertIn('정상A', md.sector_data, "신규 ETF 때문에 정상A 가 cascade drop 되면 안 됨")
+        self.assertIn('정상B', md.sector_data, "신규 ETF 때문에 정상B 가 cascade drop 되면 안 됨")
+        self.assertNotIn('신규C', md.sector_data)
+        self.assertIn('skipped', md.meta.get('신규C', {}))
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 테스트 6: naver_get_ohlcv_history 파서 단위 테스트

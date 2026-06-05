@@ -465,13 +465,15 @@ class UniverseDataSource:
         else:
             common_index = pd.DatetimeIndex([])
 
-        # ── 5. min_bars 필터 (교집합 기준) ────────────────────────────────
+        # ── 5. min_bars 필터 (섹터별 단독 길이 기준) ─────────────────────
+        # 주의: len(common_index) 가 아니라 각 섹터 OWN history 길이로 판정.
+        # 신규 상장 ETF 1개가 전 섹터를 죽이는 카스케이드 방지.
         sectors_to_drop = []
         for sector, s_df in sector_data.items():
-            aligned_len = len(common_index)
-            if aligned_len < cfg.min_bars:
+            own_len = len(s_df)
+            if own_len < cfg.min_bars:
                 meta[sector]['skipped'] = (
-                    f'공통 날짜 {aligned_len}개 < min_bars {cfg.min_bars}'
+                    f'단독 길이 {own_len}개 < min_bars {cfg.min_bars}'
                 )
                 sectors_to_drop.append(sector)
 
