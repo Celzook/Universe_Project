@@ -25,11 +25,133 @@ from etf_scoring import (
     score_all_kr_etfs,
 )
 
+from momentum_funnel import MomentumFunnel, FunnelConfig, UniverseDataSource
+
 GRID_COLS = 5
 GRID_ROWS = 4
 MAX_SELECT = GRID_COLS * GRID_ROWS   # 20
 FETCH_MONTHS = 6                      # 6개월 데이터 로드 (휠 줌 아웃용)
 DEFAULT_VIEW_MONTHS = 3               # 기본 표시 구간
+
+# ── 모멘텀 깔때기: 한국 시장 맞춤 임계값 ──────────────────────────
+FUNNEL_DEFAULT_A_ADX_MIN = 18.0
+FUNNEL_DEFAULT_B_ADX_MIN = 18.0
+FUNNEL_DEFAULT_B_MFI_LOWER = 45.0
+FUNNEL_DEFAULT_B_MFI_UPPER = 78.0
+FUNNEL_DEFAULT_MEMBERS = 5            # 섹터당 시총 상위 N개만 OHLCV 수집
+
+
+@st.cache_data(ttl=3600 * 4, show_spinner=False)
+def _cached_funnel_decision(base_date: str, n_etfs: int, max_members: int,
+                            a_adx_min: float, b_adx_min: float,
+                            b_mfi_lower: float, b_mfi_upper: float):
+    """캐시: 기준일+유니버스크기+파라미터 키. df_universe는 session_state에서 직접 조회."""
+    df_uni = st.session_state.df_universe
+    cfg = FunnelConfig(
+        a_adx_min=a_adx_min,
+        b_adx_min=b_adx_min,
+        b_mfi_lower=b_mfi_lower,
+        b_mfi_upper=b_mfi_upper,
+    )
+    src = UniverseDataSource(
+        df_uni,
+        lookback_days=180,
+        use_yf_fallback=True,
+        cfg=cfg,
+        max_members_per_sector=max_members,
+    )
+    return MomentumFunnel(src, cfg).run()
+
+
+def _funnel_section(df_uni: pd.DataFrame):
+    """🚦 모멘텀 깔때기 — 섹터 로테이션 (페이지 최상단 3블록)."""
+    st.subheader("🚦 모멘텀 깔때기 — 섹터 로테이션")
+
+    with st.expander("⚙️ 설정 (임계값 조정)", expanded=False):
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            a_adx = st.slider("Track A ADX 하한", 10.0, 30.0, FUNNEL_DEFAULT_A_ADX_MIN, 0.5, key='fn_a_adx')
+            max_mem = st.slider("섹터당 멤버 수 (시총 상위)", 3, 10, FUNNEL_DEFAULT_MEMBERS, 1, key='fn_max_mem')
+        with s2:
+            b_adx = st.slider("Track B ADX 하한", 10.0, 30.0, FUNNEL_DEFAULT_B_ADX_MIN, 0.5, key='fn_b_adx')
+        with s3:
+            mfi_lo = st.slider("Track B MFI 하한", 30.0, 60.0, FUNNEL_DEFAULT_B_MFI_LOWER, 1.0, key='fn_mfi_lo')
+        with s4:
+            mfi_hi = st.slider("Track B MFI 상한", 65.0, 90.0, FUNNEL_DEFAULT_B_MFI_UPPER, 1.0, key='fn_mfi_hi')
+
+    base_date = st.session_state.get('base_date', datetime.today().strftime('%Y%m%d'))
+
+    with st.spinner("📡 섹터 OHLCV 수집 + 깔때기 계산 중... (첫 실행 30~90초, 이후 캐시)"):
+        try:
+            decision = _cached_funnel_decision(
+                base_date, len(df_uni), max_mem,
+                a_adx, b_adx, mfi_lo, mfi_hi,
+            )
+        except Exception as e:
+            st.error(f"깔때기 실행 실패: {e}")
+            with st.expander("🔍 상세"):
+                import traceback as _tb
+                st.code(_tb.format_exc())
+            return
+
+    asof_str = decision.asof.strftime('%Y-%m-%d') if decision.asof is not None else '?'
+    n_mon = len(decision.monitor); n_ent = len(decision.entry); n_scr = len(decision.score)
+    fb_chip = "🟡 폴백(C)" if decision.used_fallback else "🟢 정상(B)"
+    st.caption(
+        f"기준일 **{asof_str}** · 모니터링 {n_mon} · 진입 {n_ent} · 스코어 {n_scr} · {fb_chip} · "
+        f"섹터=중카테고리(시총가중) · 벤치=KOSPI"
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.markdown("**🟡 모니터링 (Track A)**")
+        st.caption(f"ADX≥{a_adx:.0f} OR RS≥0 — 와이드 스크린")
+        if decision.monitor.empty:
+            st.info("통과 섹터 없음")
+        else:
+            dfm = decision.monitor[['rs', 'adx', 'mfi']].round(3).copy()
+            dfm.columns = ['RS', 'ADX', 'MFI']
+            st.dataframe(dfm, height=280, width='stretch')
+
+    with c2:
+        st.markdown("**🟢 신규 진입 (Track B)**")
+        if decision.used_fallback:
+            st.caption(f"⚠️ Track B 무응답 → C 폴백 (점수≥0.70)")
+        else:
+            st.caption(f"RS>0 → ADX≥{b_adx:.0f}↑ → MFI∈[{mfi_lo:.0f},{mfi_hi:.0f})")
+        if decision.entry.empty:
+            st.info("진입 신호 없음")
+        else:
+            dfe = decision.entry.copy()
+            cols = []
+            if 'score' in dfe.columns:
+                dfe['점수'] = dfe['score'].round(3); cols.append('점수')
+            dfe['비중%'] = decision.weights.reindex(dfe.index).mul(100).round(1) if not decision.weights.empty else 0.0
+            cols += ['비중%']
+            for src, lbl in [('adx', 'ADX'), ('mfi', 'MFI'), ('rs', 'RS')]:
+                if src in dfe.columns:
+                    dfe[lbl] = dfe[src].round(3 if src == 'rs' else 1); cols.append(lbl)
+            st.dataframe(dfe[cols], height=280, width='stretch')
+
+    with c3:
+        st.markdown("**📊 스코어 랭킹 (Track C)**")
+        st.caption("RS·ADX·ADX↑·MFI 가중합 (0~1) · 상위 10")
+        if decision.score.empty:
+            st.info("계산 결과 없음")
+        else:
+            dfs = decision.score.head(10)[['score']].round(3).copy()
+            dfs.columns = ['점수']
+            st.dataframe(
+                dfs, height=280, width='stretch',
+                column_config={
+                    '점수': st.column_config.ProgressColumn(
+                        '점수', min_value=0.0, max_value=1.0, format='%.3f',
+                    ),
+                },
+            )
+
+    st.markdown("---")
 
 
 def _score_color(c: float) -> str:
@@ -200,6 +322,9 @@ def page_etf_uniview():
     if df_uni is None or df_uni.empty:
         st.warning("유니버스 데이터가 없습니다. 다시 빌드해 주세요.")
         return
+
+    # ── 🚦 모멘텀 깔때기 (최상단) ────────────────────────────────────────────
+    _funnel_section(df_uni)
 
     # ── ETF 풀: 국내 유니버스 (시총 상위 순 정렬) ──────────────────────────
     pool_df = df_uni.copy()
