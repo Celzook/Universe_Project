@@ -171,8 +171,8 @@ def _filter_by_category(df: pd.DataFrame, cat: str, ret_col: str, bm_col: str) -
 
 
 def _render_card(slot_num: int, etf_row, ticker, ret_col, period_label, bm_col):
-    """Top 6 카드 1개 렌더."""
-    name = etf_row.get('ETF명', '')
+    """Top 6 카드 1개 렌더 (테마 적응 + 가독성 강조)."""
+    name = etf_row.get('ETF명', '') if isinstance(etf_row.get('ETF명'), str) else ''
     cat = etf_row.get('중카테고리', '') or etf_row.get('대카테고리', '')
     manager = etf_row.get('운용사', '')
     close = etf_row.get('종가', np.nan)
@@ -187,36 +187,44 @@ def _render_card(slot_num: int, etf_row, ticker, ret_col, period_label, bm_col):
     with st.container(border=True):
         h1, h2 = st.columns([4, 1])
         with h1:
-            st.markdown(f"**{name}**  \n<span style='color:#888;font-size:11px'>{ticker} · {cat or '-'}</span>",
-                        unsafe_allow_html=True)
+            # ETF 이름 — native 헤딩 (검은색 on light, 흰색 on dark)
+            st.markdown(f"#### {name}")
+            st.caption(f"`{ticker}` · {cat or '-'}{(' · ' + manager) if manager else ''}")
         with h2:
             st.markdown(
-                f"<div style='text-align:right'>"
-                f"<span style='color:#888;font-size:10px'>{period_label}</span><br>"
-                f"<span style='color:{period_color};font-weight:600;font-size:14px'>{_fmt_pct(period_ret)}</span>"
+                f"<div style='text-align:right;margin-top:6px'>"
+                f"<div style='color:#888;font-size:11px'>{period_label}</div>"
+                f"<div style='color:{period_color};font-weight:700;font-size:17px'>{_fmt_pct(period_ret)}</div>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.markdown(f"<span style='color:#888;font-size:11px'>현재가</span><br><b>{_fmt_num(close)}</b>",
-                        unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='color:#888;font-size:11px'>현재가</div>"
+                f"<div style='font-weight:700;font-size:15px'>{_fmt_num(close)}</div>",
+                unsafe_allow_html=True,
+            )
         with c2:
             st.markdown(
-                f"<span style='color:#888;font-size:11px'>오늘</span><br>"
-                f"<b style='color:{today_color}'>{_fmt_pct(today)}</b>",
+                f"<div style='color:#888;font-size:11px'>오늘</div>"
+                f"<div style='color:{today_color};font-weight:700;font-size:15px'>{_fmt_pct(today)}</div>",
                 unsafe_allow_html=True,
             )
         with c3:
-            label = 'RS' if not pd.isna(bm) else '운용'
-            value = _fmt_pct(bm) if not pd.isna(bm) else (manager[:6] if manager else '-')
-            color = bm_color if not pd.isna(bm) else '#666'
-            st.markdown(
-                f"<span style='color:#888;font-size:11px'>{label}</span><br>"
-                f"<b style='color:{color}'>{value}</b>",
-                unsafe_allow_html=True,
-            )
+            if not pd.isna(bm):
+                st.markdown(
+                    f"<div style='color:#888;font-size:11px'>RS (BM)</div>"
+                    f"<div style='color:{bm_color};font-weight:700;font-size:15px'>{_fmt_pct(bm)}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"<div style='color:#888;font-size:11px'>운용사</div>"
+                    f"<div style='font-weight:600;font-size:13px'>{(manager[:8] if manager else '-')}</div>",
+                    unsafe_allow_html=True,
+                )
 
 
 def _section_trendboard(df: pd.DataFrame):
@@ -258,17 +266,28 @@ def _section_trendboard(df: pd.DataFrame):
 # ══════════════════════════════════════════════════════════════════════
 # 섹션 2: 당일 순위
 # ══════════════════════════════════════════════════════════════════════
-def _render_winner_card(rank: int, row, ticker: str, val: float, val_label: str, color: str):
-    name = row.get('ETF명', '')
-    brand = name.strip().split()[0] if isinstance(name, str) and name.strip() else ''
-    rest = name.replace(brand, '', 1).strip() if brand else name
+def _render_winner_card(rank: int, row, ticker: str, val: float, val_kind: str, color: str):
+    """val_kind: 'pct' | '억' | 'num'."""
+    name = row.get('ETF명', '') if isinstance(row.get('ETF명'), str) else ''
+    parts = name.strip().split(maxsplit=1)
+    brand = parts[0] if parts else ''
+    rest = parts[1] if len(parts) > 1 else (brand if parts else '')
+
+    if val_kind == 'pct':
+        val_str = _fmt_pct(val); val_color = color
+    elif val_kind == '억':
+        val_str = f"{_fmt_num(val)} 억원"; val_color = '#444'
+    else:
+        val_str = _fmt_num(val); val_color = '#444'
+
     with st.container(border=True):
+        st.caption(f"🏆 {rank}위 · {brand or '-'}")
+        # ETF 이름: native heading → 테마 색상 자동 (검은색 on light)
+        st.markdown(f"### {rest or brand or '-'}")
+        st.caption(f"`{ticker}`")
         st.markdown(
-            f"<span style='color:#888;font-size:11px'>🏆 {rank}위</span><br>"
-            f"<span style='color:#666;font-size:11px'>{brand}</span><br>"
-            f"<b style='font-size:14px'>{rest}</b><br>"
-            f"<span style='color:#888;font-size:10px'>{ticker}</span><br>"
-            f"<span style='color:{color};font-size:22px;font-weight:700'>{_fmt_pct(val) if 'rate' in val_label.lower() or '%' in val_label else _fmt_num(val)}</span>",
+            f"<div style='font-size:24px;font-weight:800;color:{val_color};"
+            f"text-align:right;margin-top:6px'>{val_str}</div>",
             unsafe_allow_html=True,
         )
 
@@ -277,27 +296,30 @@ def _section_today_rank(df: pd.DataFrame):
     st.subheader("📊 당일 순위")
     c1, c2 = st.columns([2.5, 1])
     with c1:
-        st.caption("레버리지/인버스 제외 토글 + 정렬 기준 선택")
+        st.caption("정렬 기준 선택 + 레버리지/인버스 제외 토글 · 거래대금=0 ETF 자동 제외 (휴장·정지·신규)")
     with c2:
         excl_lev = st.checkbox("레버리지/인버스 제외", value=True, key='today_excl_lev')
 
-    sort_mode = st.radio("정렬", ['등락률', '거래대금', '시가총액'], horizontal=True, index=0,
+    sort_mode = st.radio("정렬", ['등락률', '거래대금(억원)', '시가총액(억원)'], horizontal=True, index=0,
                          key='today_sort', label_visibility='collapsed')
 
     pool = df.copy()
     if excl_lev and 'ETF명' in pool.columns:
         pool = pool[~pool['ETF명'].apply(_is_lev_inv)]
 
+    # 거래대금 0 / NaN ETF 제외 (휴장·신규·거래정지 노이즈 차단) — 모든 정렬 모드에 적용
+    if '거래대금(억)' in pool.columns:
+        pool = pool[pool['거래대금(억)'].fillna(0) > 0]
+
     if sort_mode == '등락률':
-        col = '오늘등락(%)'; is_pct = True
-    elif sort_mode == '거래대금':
-        col = '거래대금(억)' if '거래대금(억)' in pool.columns else None; is_pct = False
+        col = '오늘등락(%)'; val_kind = 'pct'
+    elif sort_mode == '거래대금(억원)':
+        col = '거래대금(억)' if '거래대금(억)' in pool.columns else None; val_kind = '억'
     else:
-        col = '시가총액(억원)' if '시가총액(억원)' in pool.columns else None; is_pct = False
+        col = '시가총액(억원)' if '시가총액(억원)' in pool.columns else None; val_kind = '억'
 
     if col is None or col not in pool.columns:
-        st.info(f"'{sort_mode}' 컬럼이 유니버스 데이터에 없습니다.")
-        return
+        st.info(f"'{sort_mode}' 컬럼이 유니버스 데이터에 없습니다."); return
 
     pool = pool.dropna(subset=[col])
     risers = pool.sort_values(col, ascending=False).head(7)
@@ -305,36 +327,47 @@ def _section_today_rank(df: pd.DataFrame):
 
     c_up, c_dn = st.columns(2)
 
-    def _render_side(title: str, df_side: pd.DataFrame, color: str, ascending: bool):
-        st.markdown(f"**{title}**")
+    def _render_side(title: str, df_side: pd.DataFrame, color: str):
+        st.markdown(f"### {title}")
         if df_side.empty:
             st.info("데이터 없음"); return
-        # Top 3 카드
+
+        # Top 3 카드 (큰 글씨)
         cc = st.columns(3)
         for i in range(min(3, len(df_side))):
             row = df_side.iloc[i]; ticker = df_side.index[i]; v = row[col]
             with cc[i]:
-                _render_winner_card(i+1, row, ticker, v,
-                                    'pct' if is_pct else '억', color if is_pct else '#444')
-        # 4~7위 리스트
-        for i in range(3, min(7, len(df_side))):
-            row = df_side.iloc[i]; ticker = df_side.index[i]; v = row[col]
-            name = row.get('ETF명', '')
-            v_str = _fmt_pct(v) if is_pct else f"{_fmt_num(v)}{'억' if '거래대금' in sort_mode or '시가' in sort_mode else ''}"
-            col_str = (UP_COLOR if v >= 0 else DOWN_COLOR) if is_pct else '#444'
-            st.markdown(
-                f"<div style='display:flex;justify-content:space-between;"
-                f"padding:6px 10px;border-bottom:1px solid #2a2a2a;'>"
-                f"<span style='color:#aaa'>{i+1}. {name} <span style='color:#666;font-size:10px'>{ticker}</span></span>"
-                f"<span style='color:{col_str};font-weight:600'>{v_str}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
+                _render_winner_card(i + 1, row, ticker, v, val_kind, color)
+
+        # 4~7위 리스트 — st.dataframe (테마 적응 + 가독성)
+        if len(df_side) > 3:
+            rest = df_side.iloc[3:7].copy()
+            rest.insert(0, '#', range(4, 4 + len(rest)))
+            rest['ETF'] = rest['ETF명']
+            rest['티커'] = rest.index.astype(str)
+            value_label = '등락 %' if val_kind == 'pct' else '값 (억원)'
+            rest[value_label] = rest[col].astype(float)
+            view = rest[['#', 'ETF', '티커', value_label]]
+
+            if val_kind == 'pct':
+                num_cfg = st.column_config.NumberColumn(value_label, format='%+.2f')
+            else:
+                num_cfg = st.column_config.NumberColumn(value_label, format='%,.0f')
+
+            st.dataframe(
+                view, hide_index=True, width='stretch', height=200,
+                column_config={
+                    '#': st.column_config.NumberColumn('#', width='small', format='%d'),
+                    'ETF': st.column_config.TextColumn('ETF명', width='large'),
+                    '티커': st.column_config.TextColumn('티커', width='small'),
+                    value_label: num_cfg,
+                },
             )
 
     with c_up:
-        _render_side("🔴 상승 TOP", risers, UP_COLOR, ascending=False)
+        _render_side("🔴 상승 TOP", risers, UP_COLOR)
     with c_dn:
-        _render_side("🔵 하락 TOP", fallers, DOWN_COLOR, ascending=True)
+        _render_side("🔵 하락 TOP", fallers, DOWN_COLOR)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -364,6 +397,9 @@ def _section_period_rank(df: pd.DataFrame, df_close: pd.DataFrame):
             return
 
     pool = pool.dropna(subset=[col])
+    # 하락 TOP 노이즈 차단: 거래대금 0인 ETF 제외 (휴장·정지 ETF가 큰 음수 등장 방지)
+    if '거래대금(억)' in pool.columns:
+        pool = pool[pool['거래대금(억)'].fillna(0) > 0]
     if pool.empty:
         st.info("유효 데이터 없음"); return
 
@@ -372,24 +408,30 @@ def _section_period_rank(df: pd.DataFrame, df_close: pd.DataFrame):
 
     c_up, c_dn = st.columns(2)
 
-    def _render_list(title: str, df_side: pd.DataFrame, color: str):
-        st.markdown(f"**{title}**")
-        for i in range(len(df_side)):
-            row = df_side.iloc[i]; ticker = df_side.index[i]; v = row[col]
-            name = row.get('ETF명', '')
-            st.markdown(
-                f"<div style='display:flex;justify-content:space-between;"
-                f"padding:8px 12px;border-bottom:1px solid #2a2a2a;'>"
-                f"<span><span style='color:#666;margin-right:8px'>{i+1}</span>"
-                f"<b style='color:#ddd'>{name}</b> <span style='color:#666;font-size:10px'>{ticker}</span></span>"
-                f"<b style='color:{color}'>{_fmt_pct(v)}</b></div>",
-                unsafe_allow_html=True,
-            )
+    def _render_list(title: str, df_side: pd.DataFrame):
+        st.markdown(f"### {title}")
+        if df_side.empty:
+            st.info("데이터 없음"); return
+        view = df_side.copy()
+        view.insert(0, '#', range(1, len(view) + 1))
+        view['ETF'] = view['ETF명']
+        view['티커'] = view.index.astype(str)
+        view['수익률 %'] = view[col].astype(float)
+        view = view[['#', 'ETF', '티커', '수익률 %']]
+        st.dataframe(
+            view, hide_index=True, width='stretch', height=240,
+            column_config={
+                '#': st.column_config.NumberColumn('#', width='small', format='%d'),
+                'ETF': st.column_config.TextColumn('ETF명', width='large'),
+                '티커': st.column_config.TextColumn('티커', width='small'),
+                '수익률 %': st.column_config.NumberColumn('수익률 %', format='%+.2f'),
+            },
+        )
 
     with c_up:
-        _render_list("🔴 상승 TOP 5", risers, UP_COLOR)
+        _render_list("🔴 상승 TOP 5", risers)
     with c_dn:
-        _render_list("🔵 하락 TOP 5", fallers, DOWN_COLOR)
+        _render_list("🔵 하락 TOP 5", fallers)
 
 
 # ══════════════════════════════════════════════════════════════════════
