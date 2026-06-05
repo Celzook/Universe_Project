@@ -63,9 +63,29 @@ def _cached_funnel_decision(base_date: str, n_etfs: int, max_members: int,
     return MomentumFunnel(src, cfg).run()
 
 
+_FUNNEL_HELP = """
+**섹터 로테이션 시그널** — 중카테고리 단위 시총가중 인덱스에서 주도 섹터 추출.
+
+**RS (Relative Strength)** — 벤치(KOSPI) 대비 상대강도.
+log(섹터/벤치) 의 최근 20일 회귀 기울기. 양수 → 벤치 대비 우월, 음수 → 열등.
+
+**ADX (Average Directional Index, 0–100)** — 추세 강도(방향 무관).
+Wilder 14기간. **20+ 명확한 추세 / 25+ 강추세 / 40+ 과열 가능**.
+ADX↑(전일 대비 상승)이면 추세 가속.
+
+**MFI (Money Flow Index, 0–100)** — 자금 흐름 강도(거래대금 가중 RSI).
+**50–80 건강한 매수 압력 / 80+ 과열 / 20- 과매도**.
+Sweet-spot 65 중심 가우시안으로 점수화.
+
+**Track A (모니터링)** — ADX≥18 OR RS≥0 (느슨한 와이드 스크린)
+**Track B (신규 진입)** — RS>0 → ADX≥18↑ → MFI∈[45,78) 직렬 AND
+**Track C (스코어)** — 4지표 가중합 [0,1]. B 무응답 시 점수≥0.70 폴백.
+"""
+
+
 def _funnel_section(df_uni: pd.DataFrame):
-    """🚦 모멘텀 깔때기 — 섹터 로테이션 (페이지 최상단 3블록)."""
-    st.subheader("🚦 모멘텀 깔때기 — 섹터 로테이션")
+    """🚦 Momentum Funnel — 섹터 로테이션 (페이지 최상단 3블록)."""
+    st.subheader("🚦 Momentum Funnel — 섹터 로테이션", help=_FUNNEL_HELP)
 
     with st.expander("⚙️ 설정 (임계값 조정)", expanded=False):
         s1, s2, s3, s4 = st.columns(4)
