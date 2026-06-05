@@ -31,6 +31,11 @@ class FunnelConfig:
     w_mfi: float = 0.20
     c_fallback_min_score: float = 0.70  # B가 빌 때 C 폴백 하한
 
+    # ── Hot Board ──────────────────────────────────────────
+    hot_vol_lookback: int = 20      # VolRatio 기간 평균 (영업일)
+    hot_money_lookback: int = 5     # MoneyFlow 누적 기간 (영업일)
+    hot_top_n: int = 5              # MP 새틀라이트 개수
+
     # 워밍업: 자동 계산 (init=False)
     min_bars: int = field(init=False)
 

@@ -7,6 +7,12 @@ from .contracts import MarketData, Decision, DataSource, OHLCV_COLS, METRICS_COL
 from .config import FunnelConfig
 from .data_adapter import UniverseDataSource
 from .pipeline import MomentumFunnel
+from .hot_board import (
+    compute_hot_metrics, build_mp,
+    EXCLUDED_CATEGORIES_DEFAULT,
+    CORE_TICKER_DEFAULT, CORE_NAME_DEFAULT,
+    HOT_COLS,
+)
 
 __all__ = [
     "MarketData", "Decision", "DataSource",
@@ -14,4 +20,8 @@ __all__ = [
     "FunnelConfig",
     "UniverseDataSource",
     "MomentumFunnel",
+    "compute_hot_metrics", "build_mp",
+    "EXCLUDED_CATEGORIES_DEFAULT",
+    "CORE_TICKER_DEFAULT", "CORE_NAME_DEFAULT",
+    "HOT_COLS",
 ]
