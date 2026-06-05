@@ -365,11 +365,16 @@ def _render_winner_card(rank: int, row, ticker: str, val: float, val_kind: str, 
 
     with st.container(border=True):
         st.caption(f"🏆 {rank}위 · {brand or '-'}")
-        # ETF 이름: native heading → 테마 색상 자동 (검은색 on light)
-        st.markdown(f"### {rest or brand or '-'}")
+        # ETF 이름: 16px 명시 + bold (테마 색 자동 = 라이트=검정/다크=흰)
+        st.markdown(
+            f"<div style='font-size:15px;font-weight:700;line-height:1.3;"
+            f"margin:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"
+            f"{rest or brand or '-'}</div>",
+            unsafe_allow_html=True,
+        )
         st.caption(f"`{ticker}`")
         st.markdown(
-            f"<div style='font-size:24px;font-weight:800;color:{val_color};"
+            f"<div style='font-size:22px;font-weight:800;color:{val_color};"
             f"text-align:right;margin-top:6px'>{val_str}</div>",
             unsafe_allow_html=True,
         )
