@@ -316,6 +316,48 @@ def _section_trendboard(df: pd.DataFrame):
 
     is_vol_surge = (cat == '🔥 거래 급증') and ('_vol_ratio' in top6.columns)
 
+    # 거래 급증 검증 expander — 사용자가 직접 OHLCV 원본 확인
+    if is_vol_surge and not top6.empty:
+        with st.expander("🔍 거래 급증 데이터 검증 (네이버 OHLCV 원본)"):
+            try:
+                from momentum_funnel.data_adapter import naver_get_ohlcv_history
+                base_date = st.session_state.get('base_date') or datetime.today().strftime('%Y%m%d')
+                end = pd.Timestamp(base_date)
+                start = (end - pd.Timedelta(days=15)).strftime('%Y%m%d')
+                end_s = end.strftime('%Y%m%d')
+                check_t = st.selectbox(
+                    "검증할 ETF (Top 6 중)",
+                    options=[(str(top6.index[i]), top6.iloc[i].get('ETF명','')) for i in range(len(top6))],
+                    format_func=lambda x: f"{x[0]} · {x[1]}",
+                    key='vol_verify_sel',
+                )
+                tk = check_t[0]
+                raw = naver_get_ohlcv_history(tk, start, end_s)
+                if raw.empty:
+                    st.warning("네이버 응답 없음")
+                else:
+                    raw = raw.dropna().tail(7).copy()
+                    raw['거래대금(억)'] = (raw['close'] * raw['volume'] / 1e8).round(1)
+                    raw['전일대비배율'] = (raw['거래대금(억)'] / raw['거래대금(억)'].shift(1)).round(3)
+                    raw.index = raw.index.strftime('%Y-%m-%d')
+                    st.dataframe(
+                        raw[['close','volume','거래대금(억)','전일대비배율']],
+                        width='stretch',
+                        column_config={
+                            'close': st.column_config.NumberColumn('종가', format='%,.0f'),
+                            'volume': st.column_config.NumberColumn('거래량(주)', format='%,.0f'),
+                            '거래대금(억)': st.column_config.NumberColumn('거래대금(억원)', format='%,.1f'),
+                            '전일대비배율': st.column_config.NumberColumn('전일대비배율', format='%.3fx'),
+                        },
+                    )
+                    st.caption(
+                        "거래대금(억원) = close × volume ÷ 1억. "
+                        "전일대비배율 = 오늘/전일 거래대금. "
+                        "마지막 행이 트렌드보드 카드에 표시되는 값입니다."
+                    )
+            except Exception as e:
+                st.error(f"검증 실패: {e}")
+
     with c_cards:
         if top6.empty:
             if cat == '🔥 거래 급증':
