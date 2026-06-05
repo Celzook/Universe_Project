@@ -112,6 +112,54 @@ def _fmt_num(v) -> str:
         return str(v)
 
 
+def _fmt_vol_ratio(r: float) -> str:
+    """전일대비 거래대금 배율 → '+XX.XX%' or '×N배'."""
+    if pd.isna(r):
+        return '-'
+    if r >= 10.0:
+        return f"×{int(r)}배"
+    pct = (r - 1.0) * 100.0
+    sign = '+' if pct >= 0 else ''
+    return f"{sign}{pct:.2f}%"
+
+
+# ── 전일대비 거래대금 비율 캐시 (네이버 OHLCV 재활용) ────────────────────
+@st.cache_data(ttl=3600 * 2, show_spinner=False)
+def _cached_vol_ratios(tickers: tuple, base_date: str) -> dict:
+    """
+    티커 리스트에 대해 (오늘 거래대금 / 전일 거래대금) 비율을 계산.
+    거래대금 = close × volume (네이버 OHLCV).
+    Returns: {ticker: ratio}
+    """
+    try:
+        from momentum_funnel.data_adapter import naver_get_ohlcv_history
+    except Exception:
+        return {}
+
+    end_dt = pd.Timestamp(base_date) if base_date else pd.Timestamp.today()
+    start_dt = end_dt - pd.Timedelta(days=15)  # 휴일 여유
+    end_str = end_dt.strftime('%Y%m%d')
+    start_str = start_dt.strftime('%Y%m%d')
+
+    out: dict = {}
+    for t in tickers:
+        try:
+            ohlcv = naver_get_ohlcv_history(str(t), start_str, end_str)
+            if ohlcv is None or ohlcv.empty or 'close' not in ohlcv.columns or 'volume' not in ohlcv.columns:
+                continue
+            ohlcv = ohlcv.dropna(subset=['close', 'volume'])
+            if len(ohlcv) < 2:
+                continue
+            amount = (ohlcv['close'] * ohlcv['volume']).astype(float)
+            today_amt = float(amount.iloc[-1])
+            prev_amt = float(amount.iloc[-2])
+            if prev_amt > 0 and today_amt > 0:
+                out[str(t)] = today_amt / prev_amt
+        except Exception:
+            continue
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 섹션 1: ETF 트렌드보드 (좌측 카테고리 + 우측 Top 6)
 # ══════════════════════════════════════════════════════════════════════
@@ -126,10 +174,20 @@ def _filter_by_category(df: pd.DataFrame, cat: str, ret_col: str, bm_col: str) -
             return cand.dropna(subset=[bm_col]).sort_values(bm_col, ascending=False)
         return cand.sort_values(ret_col, ascending=False, na_position='last')
     if cat == '🔥 거래 급증':
-        # 일별 거래량 시계열 없음 → 빌드시점 거래대금 상위로 대체
-        if '거래대금(억)' in cand.columns:
-            return cand.dropna(subset=['거래대금(억)']).sort_values('거래대금(억)', ascending=False)
-        return cand.head(0)
+        # 1단계: 거래대금 상위 ~60개 pre-screen (휴면 ETF 제외)
+        if '거래대금(억)' not in cand.columns:
+            return cand.head(0)
+        pre = cand.dropna(subset=['거래대금(억)'])
+        pre = pre[pre['거래대금(억)'] > 0].sort_values('거래대금(억)', ascending=False).head(60)
+        # 2단계: 네이버 OHLCV로 전일대비 거래대금 비율 계산 (캐시 2h)
+        tickers = tuple(pre.index.astype(str))
+        base_date = st.session_state.get('base_date') or datetime.today().strftime('%Y%m%d')
+        ratios = _cached_vol_ratios(tickers, base_date)
+        pre = pre.copy()
+        pre['_vol_ratio'] = pre.index.astype(str).map(ratios)
+        pre = pre.dropna(subset=['_vol_ratio'])
+        pre = pre[pre['_vol_ratio'] > 1.0]   # 증가 ETF만
+        return pre.sort_values('_vol_ratio', ascending=False)
     if cat == '⭐ 신규 상장':
         if '설정일' not in cand.columns:
             return cand.head(0)
@@ -170,8 +228,11 @@ def _filter_by_category(df: pd.DataFrame, cat: str, ret_col: str, bm_col: str) -
     return cand.head(0)
 
 
-def _render_card(slot_num: int, etf_row, ticker, ret_col, period_label, bm_col):
-    """Top 6 카드 1개 렌더 (테마 적응 + 가독성 강조)."""
+def _render_card(slot_num: int, etf_row, ticker, ret_col, period_label, bm_col,
+                 third_label: str = None, third_value: str = None, third_color: str = None):
+    """Top 6 카드 1개 렌더 (테마 적응 + 가독성 강조).
+
+    third_label/value/color : 3번째 메트릭을 RS 대신 강제 표시 (예: 전일대비 거래)."""
     name = etf_row.get('ETF명', '') if isinstance(etf_row.get('ETF명'), str) else ''
     cat = etf_row.get('중카테고리', '') or etf_row.get('대카테고리', '')
     manager = etf_row.get('운용사', '')
@@ -213,7 +274,14 @@ def _render_card(slot_num: int, etf_row, ticker, ret_col, period_label, bm_col):
                 unsafe_allow_html=True,
             )
         with c3:
-            if not pd.isna(bm):
+            if third_label is not None and third_value is not None:
+                # 오버라이드 (예: 전일대비 거래대금)
+                st.markdown(
+                    f"<div style='color:#888;font-size:11px'>{third_label}</div>"
+                    f"<div style='color:{third_color or '#444'};font-weight:700;font-size:15px'>{third_value}</div>",
+                    unsafe_allow_html=True,
+                )
+            elif not pd.isna(bm):
                 st.markdown(
                     f"<div style='color:#888;font-size:11px'>RS (BM)</div>"
                     f"<div style='color:{bm_color};font-weight:700;font-size:15px'>{_fmt_pct(bm)}</div>",
@@ -246,9 +314,14 @@ def _section_trendboard(df: pd.DataFrame):
     candidates = _filter_by_category(df, cat, ret_col, bm_col)
     top6 = candidates.head(6)
 
+    is_vol_surge = (cat == '🔥 거래 급증') and ('_vol_ratio' in top6.columns)
+
     with c_cards:
         if top6.empty:
-            st.info(f"{cat} 카테고리 후보 없음 (유니버스 빌드 또는 데이터 부족)")
+            if cat == '🔥 거래 급증':
+                st.info("거래 급증 후보 없음 — 빌드 직후이거나 네이버 OHLCV 미수집. 잠시 후 재시도하세요.")
+            else:
+                st.info(f"{cat} 카테고리 후보 없음 (유니버스 빌드 또는 데이터 부족)")
         else:
             for row_i in range(2):
                 cc = st.columns(3)
@@ -258,7 +331,17 @@ def _section_trendboard(df: pd.DataFrame):
                         if slot < len(top6):
                             row = top6.iloc[slot]
                             ticker = top6.index[slot]
-                            _render_card(slot + 1, row, ticker, ret_col, period_label, bm_col)
+                            # 거래 급증: 3번째 메트릭을 RS 대신 전일대비 거래대금 비율
+                            if is_vol_surge:
+                                vr = row.get('_vol_ratio')
+                                vr_str = _fmt_vol_ratio(vr)
+                                vr_color = UP_COLOR if (not pd.isna(vr) and vr > 1.0) else DOWN_COLOR
+                                _render_card(slot + 1, row, ticker, ret_col, period_label, bm_col,
+                                             third_label='전일대비 거래',
+                                             third_value=vr_str,
+                                             third_color=vr_color)
+                            else:
+                                _render_card(slot + 1, row, ticker, ret_col, period_label, bm_col)
                         else:
                             st.empty()
 
