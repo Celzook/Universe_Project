@@ -22,6 +22,7 @@ import pandas as pd
 
 SAVED_MP_DIR = "saved_mps"
 SAVED_MP_FILE = "current.json"
+HISTORY_FILE = "history.json"
 DEFAULT_REPO = "Celzook/Universe_Project"
 
 
@@ -128,6 +129,152 @@ def delete_mp() -> bool:
         except Exception:
             return False
     return False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 1-B. HISTORY 일별 스냅샷 (Phase 2)
+# ──────────────────────────────────────────────────────────────────────
+def _history_path() -> str:
+    return os.path.join(SAVED_MP_DIR, HISTORY_FILE)
+
+
+def load_history() -> list:
+    """`saved_mps/history.json` 의 일별 스냅샷 리스트 로드.
+
+    우선순위:
+      1) 로컬 파일
+      2) GitHub raw URL fallback (saved MP 와 동일 패턴)
+
+    각 entry 스키마:
+      {date: 'YYYY-MM-DD', nav_krw: float, nav_pct: float,
+       active_sat_count: int, n_trades_total: int,
+       inception_date: str, method: str, mode: str,
+       positions: [{ticker, representative, category, role, weight_pct}],
+       ap_excess_pct: float | None}
+    """
+    path = _history_path()
+    data = None
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            data = None
+
+    if data is None:
+        data = _fetch_history_from_github_raw()
+        if data is not None:
+            try:
+                os.makedirs(SAVED_MP_DIR, exist_ok=True)
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+def _fetch_history_from_github_raw(branch: str = 'main',
+                                   repo: str = DEFAULT_REPO,
+                                   timeout: float = 10.0) -> Optional[list]:
+    try:
+        import requests
+    except ImportError:
+        return None
+    url = (
+        f"https://raw.githubusercontent.com/{repo}/{branch}/"
+        f"{SAVED_MP_DIR}/{HISTORY_FILE}"
+    )
+    try:
+        r = requests.get(url, timeout=timeout)
+        if r.status_code == 200:
+            data = r.json()
+            return data if isinstance(data, list) else None
+    except Exception:
+        return None
+    return None
+
+
+def append_history_snapshot(entry: dict) -> Tuple[str, list]:
+    """history.json 끝에 단일 스냅샷 append. 동일 date 가 있으면 덮어씀.
+
+    Parameters
+    ----------
+    entry : dict
+        최소 'date' (YYYY-MM-DD) 필드 필수. 다른 키는 호출자가 정의.
+
+    Returns
+    -------
+    (path, full_history_list)
+    """
+    if 'date' not in entry:
+        raise ValueError("entry must contain 'date' field")
+
+    os.makedirs(SAVED_MP_DIR, exist_ok=True)
+    history = load_history()
+
+    # 동일 날짜는 교체 (재시도/덮어쓰기 안전)
+    date_key = str(entry['date'])
+    history = [e for e in history if str(e.get('date', '')) != date_key]
+    history.append(entry)
+    history.sort(key=lambda e: str(e.get('date', '')))
+
+    path = _history_path()
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+    return path, history
+
+
+def push_history_to_github(history: list,
+                           repo: str = DEFAULT_REPO,
+                           message: str = None) -> Tuple[bool, str]:
+    """history.json 을 GitHub Contents API 로 업로드. push_to_github 와 동일 패턴.
+
+    Phase 3 (cron) 와 수동 저장 둘 다 사용.
+    """
+    import requests
+
+    token = _get_github_token()
+    if not token:
+        return False, 'no GITHUB_TOKEN / st.secrets.github_token configured'
+
+    path = f"{SAVED_MP_DIR}/{HISTORY_FILE}"
+    latest_date = (history[-1].get('date', '?') if history else '?')
+    message = message or f"chore: append MP history snapshot ({latest_date})"
+
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    headers = {
+        'Authorization': f"Bearer {token}",
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+    }
+
+    sha = None
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            sha = r.json().get('sha')
+    except Exception:
+        pass
+
+    content_str = json.dumps(history, ensure_ascii=False, indent=2)
+    body = {
+        'message': message,
+        'content': base64.b64encode(content_str.encode('utf-8')).decode('ascii'),
+    }
+    if sha:
+        body['sha'] = sha
+
+    try:
+        r = requests.put(url, headers=headers, json=body, timeout=20)
+        if r.status_code in (200, 201):
+            commit_sha = r.json().get('commit', {}).get('sha', '')[:7]
+            return True, f"커밋 {commit_sha} push 성공"
+        return False, f"{r.status_code}: {r.text[:200]}"
+    except Exception as e:
+        return False, f"네트워크 에러: {e}"
 
 
 # ──────────────────────────────────────────────────────────────────────

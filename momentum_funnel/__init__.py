@@ -16,6 +16,7 @@ from .hot_board import (
 from .portfolio_tracker import (
     save_mp_local, load_mp, delete_mp,
     push_to_github, compute_mp_performance,
+    load_history, append_history_snapshot, push_history_to_github,
 )
 from .rebalancer import (
     apply_rules, PositionState,
@@ -23,6 +24,7 @@ from .rebalancer import (
     BM_50PCT_THRESHOLD, BM_FULL_THRESHOLD,
     MDD_50PCT_THRESHOLD, MDD_FULL_THRESHOLD,
 )
+from .snapshot import build_snapshot
 
 __all__ = [
     "MarketData", "Decision", "DataSource",
@@ -36,8 +38,10 @@ __all__ = [
     "HOT_COLS",
     "save_mp_local", "load_mp", "delete_mp",
     "push_to_github", "compute_mp_performance",
+    "load_history", "append_history_snapshot", "push_history_to_github",
     "apply_rules", "PositionState",
     "INITIAL_CAPITAL_DEFAULT",
     "BM_50PCT_THRESHOLD", "BM_FULL_THRESHOLD",
     "MDD_50PCT_THRESHOLD", "MDD_FULL_THRESHOLD",
+    "build_snapshot",
 ]

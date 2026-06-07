@@ -36,6 +36,11 @@ try:
     _HAS_TRENDBOARD = True
 except ImportError:
     _HAS_TRENDBOARD = False
+try:
+    from page_history import page_history
+    _HAS_HISTORY = True
+except ImportError:
+    _HAS_HISTORY = False
 
 
 # ============================================================================
@@ -164,6 +169,8 @@ def render_sidebar():
         menu_items.append("🔭 ETF Uniview")
     if _HAS_TRENDBOARD:
         menu_items.append("🗂️ ETF 트렌드보드")
+    if _HAS_HISTORY:
+        menu_items.append("📜 MP History")
     return st.sidebar.radio("📌 메뉴", menu_items, label_visibility="collapsed")
 
 def run_universe_build(min_cap, top_n):
@@ -849,6 +856,7 @@ def main():
     elif page == "수익률 비교": page_returns()
     elif page == "🔭 ETF Uniview" and _HAS_UNIVIEW: page_etf_uniview()
     elif page == "🗂️ ETF 트렌드보드" and _HAS_TRENDBOARD: page_trendboard()
+    elif page == "📜 MP History" and _HAS_HISTORY: page_history()
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,49 @@
+name: Daily MP History Snapshot
+
+# 평일 KST 23:00 (= UTC 14:00) 자동 실행 + 수동 실행 허용.
+# 휴장일은 스크립트 내부에서 KOSPI 데이터로 판정 후 exit 0.
+on:
+  schedule:
+    - cron: '0 14 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '룰 5 신규 편입 방법 (A | B)'
+        required: false
+        default: 'A'
+        type: choice
+        options:
+          - A
+          - B
+
+permissions:
+  contents: write   # push_history_to_github (Contents API) 에 필요
+
+concurrency:
+  group: daily-history
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Record history snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HISTORY_MODE: ${{ inputs.mode || 'A' }}
+        run: python scripts/record_history.py
