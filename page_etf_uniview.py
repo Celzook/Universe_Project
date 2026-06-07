@@ -314,12 +314,14 @@ def _hot_board_section(df_uni: pd.DataFrame):
 INDEX_FUND_CODES = {'V5202E', 'V5304R', 'V6303V', 'V72026'}
 
 # Excel 컬럼 위치 (A=0, B=1, … Z=25)
-AP_COL_C_FUND_CODE = 2    # 펀드코드
-AP_COL_D_FUND_NAME = 3    # 펀드명
-AP_COL_H_STOCK_NAME = 7   # 종목명
-AP_COL_S_VALUE = 18       # 적용평가액
-AP_COL_X_BUY_DATE = 23    # 최초 매수일자 (편입일)
-AP_COL_Z_BUY_PRICE = 25   # 적용단가
+AP_COL_C_FUND_CODE = 2     # 펀드코드
+AP_COL_D_FUND_NAME = 3     # 펀드명
+AP_COL_H_STOCK_NAME = 7    # 종목명
+AP_COL_M_FACE_QTY = 12     # 액면수량
+AP_COL_Q_ORIG_COST = 16    # 원취득가액
+AP_COL_S_VALUE = 18        # 적용평가액
+AP_COL_X_BUY_DATE = 23     # 최초 매수일자 (편입일)
+# 가중평균단가 = SUM(원취득가액) / SUM(액면수량) — ETF 그룹 단위
 
 
 def _classify_fund(code: str, name: str) -> str:
@@ -389,22 +391,24 @@ def _parse_ap_for_analysis(ap_df: pd.DataFrame, df_uni: pd.DataFrame) -> pd.Data
 
     n_cols = ap_df.shape[1]
     needed = max(AP_COL_C_FUND_CODE, AP_COL_D_FUND_NAME, AP_COL_H_STOCK_NAME,
-                 AP_COL_S_VALUE, AP_COL_X_BUY_DATE, AP_COL_Z_BUY_PRICE)
+                 AP_COL_M_FACE_QTY, AP_COL_Q_ORIG_COST,
+                 AP_COL_S_VALUE, AP_COL_X_BUY_DATE)
     if n_cols <= needed:
         raise ValueError(
-            f"AP 파일 컬럼 수({n_cols})가 부족합니다 — Z열(index {needed})까지 필요."
+            f"AP 파일 컬럼 수({n_cols})가 부족합니다 — 최소 {needed + 1}개 필요."
         )
 
     base = pd.DataFrame({
         '펀드코드': ap_df.iloc[:, AP_COL_C_FUND_CODE].astype(str).str.strip(),
         '펀드명': ap_df.iloc[:, AP_COL_D_FUND_NAME].astype(str),
         '종목명': ap_df.iloc[:, AP_COL_H_STOCK_NAME].astype(str).str.strip(),
+        '액면수량': pd.to_numeric(ap_df.iloc[:, AP_COL_M_FACE_QTY], errors='coerce'),
+        '원취득가액': pd.to_numeric(ap_df.iloc[:, AP_COL_Q_ORIG_COST], errors='coerce'),
         '적용평가액': pd.to_numeric(ap_df.iloc[:, AP_COL_S_VALUE], errors='coerce'),
         '편입일': pd.to_datetime(ap_df.iloc[:, AP_COL_X_BUY_DATE], errors='coerce'),
-        '적용단가': pd.to_numeric(ap_df.iloc[:, AP_COL_Z_BUY_PRICE], errors='coerce'),
     })
-    base = base.dropna(subset=['적용평가액', '편입일', '적용단가'])
-    base = base[base['적용평가액'] > 0]
+    base = base.dropna(subset=['적용평가액', '편입일', '액면수량', '원취득가액'])
+    base = base[(base['적용평가액'] > 0) & (base['액면수량'] > 0) & (base['원취득가액'] > 0)]
     base = base[base['종목명'].str.len() > 0]
     if base.empty:
         return pd.DataFrame()
@@ -429,12 +433,12 @@ def _parse_ap_for_analysis(ap_df: pd.DataFrame, df_uni: pd.DataFrame) -> pd.Data
         total = float(sub['적용평가액'].sum())
         for nm, g in sub.groupby('종목명'):
             value_sum = float(g['적용평가액'].sum())
+            cost_sum = float(g['원취득가액'].sum())
+            qty_sum = float(g['액면수량'].sum())
             tk_series = g['티커'].replace('', np.nan).dropna()
             ticker = str(tk_series.iloc[0]) if len(tk_series) > 0 else ''
-            w_price = (
-                float((g['적용단가'] * g['적용평가액']).sum() / value_sum)
-                if value_sum > 0 else np.nan
-            )
+            # 가중평균단가 = SUM(원취득가액) / SUM(액면수량) — 표준 평균단가
+            w_price = (cost_sum / qty_sum) if qty_sum > 0 else np.nan
             rows.append({
                 '분류': cat,
                 '종목명': nm,
@@ -443,6 +447,8 @@ def _parse_ap_for_analysis(ap_df: pd.DataFrame, df_uni: pd.DataFrame) -> pd.Data
                 '비중%': (value_sum / total * 100) if total > 0 else np.nan,
                 '편입일': g['편입일'].min(),
                 '가중평균단가': w_price,
+                '원취득가액': cost_sum,
+                '액면수량': qty_sum,
             })
     return pd.DataFrame(rows)
 
@@ -565,6 +571,97 @@ def _ap_upload_section():
             st.caption("👉 가공 로직은 추후 연결 — `st.session_state['ap_df']` 로 접근 가능.")
 
 
+def _compute_mp_port_excess():
+    """저장된 MP 의 포트폴리오 비중 가중 누적 초과수익률(% vs KOSPI) 계산.
+
+    Returns dict | None.  네트워크 호출이 일어나므로 분석 실행 시점에만 호출.
+    """
+    saved = load_mp()
+    if not saved:
+        return None
+    try:
+        from etf_universe_builder import (
+            naver_get_price_history, naver_get_index_history,
+        )
+
+        def _fc(t, s, e):
+            return naver_get_price_history(t, s, e)
+
+        def _fk(s, e):
+            return naver_get_index_history('KOSPI', s, e)
+
+        perf = compute_mp_performance(saved, _fc, _fk)
+        if perf.empty:
+            return None
+        port_cum = float(
+            (perf['시작비중%'] / 100.0 * perf['누적%'].fillna(0)).sum()
+        )
+        return {
+            'mp_cum': port_cum,
+            'inception': str(saved.get('inception_date', '?')),
+            'method': str(saved.get('method', '?')),
+            'n_pos': int(len(saved.get('positions', []))),
+        }
+    except Exception:
+        return None
+
+
+def _render_ap_mp_comparison(enriched: pd.DataFrame):
+    """포트폴리오 수준 비교 — AP (KOSPI200 BM) vs 저장 MP (KOSPI BM)."""
+    st.markdown("---")
+    st.subheader("📊 AP vs MP 포트폴리오 수준 비교 (비중 가중 초과성과)")
+
+    valid = enriched.dropna(subset=['초과성과%'])
+    if not valid.empty and valid['적용평가액'].sum() > 0:
+        ap_excess = float(
+            (valid['초과성과%'] * valid['적용평가액']).sum()
+            / valid['적용평가액'].sum()
+        )
+        # 단순 수익률(비교용)
+        valid_r = enriched.dropna(subset=['수익률%'])
+        ap_ret = (
+            float((valid_r['수익률%'] * valid_r['적용평가액']).sum()
+                  / valid_r['적용평가액'].sum())
+            if not valid_r.empty and valid_r['적용평가액'].sum() > 0 else np.nan
+        )
+    else:
+        ap_excess = np.nan
+        ap_ret = np.nan
+
+    mp_info = st.session_state.get('ap_mp_compare')
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "AP 비중 가중 수익률",
+        f"{ap_ret:+.2f}%" if not np.isnan(ap_ret) else "N/A",
+    )
+    c2.metric(
+        "AP 비중 가중 초과성과 (vs KOSPI200)",
+        f"{ap_excess:+.2f}%" if not np.isnan(ap_excess) else "N/A",
+    )
+    if mp_info:
+        c3.metric(
+            f"MP 비중 가중 초과성과 (vs KOSPI)",
+            f"{mp_info['mp_cum']:+.2f}%",
+            help=f"편입일 {mp_info['inception']} · 방법 {mp_info['method']} · "
+                 f"{mp_info['n_pos']}개 포지션",
+        )
+        diff = (ap_excess - mp_info['mp_cum']) if not np.isnan(ap_excess) else np.nan
+        c4.metric(
+            "차이 (AP − MP)",
+            f"{diff:+.2f}%p" if not np.isnan(diff) else "N/A",
+            help="양수면 AP 가 MP 보다 초과수익률 우위",
+        )
+    else:
+        c3.metric("MP 비중 가중 초과성과", "N/A")
+        c4.metric("차이 (AP − MP)", "N/A", help="저장된 MP 없음")
+
+    st.caption(
+        "AP 의 BM 은 KOSPI200, MP 의 BM 은 KOSPI (저장 MP 기존 계산 유지). "
+        "둘 다 한국 대형주 지수로 근사 비교. 엄밀 일치 필요 시 BM 통일 요청 바람."
+    )
+
+
 def _ap_processing_section(df_uni: pd.DataFrame):
     """🔬 AP 초과성과 분석 — 업로드된 ap_df 가 있을 때만 표시."""
     ap_df = st.session_state.get('ap_df')
@@ -574,16 +671,18 @@ def _ap_processing_section(df_uni: pd.DataFrame):
     st.subheader("🔬 AP 초과성과 분석")
     with st.expander("📐 분석 규칙", expanded=False):
         st.markdown("""
-- **컬럼 매핑** (Excel 위치 기준): C=펀드코드, D=펀드명, H=종목명, S=적용평가액,
-  X=최초 매수일자(편입일), Z=적용단가.
+- **컬럼 매핑** (Excel 위치 기준): C=펀드코드, D=펀드명, H=종목명,
+  M=액면수량, Q=원취득가액, S=적용평가액, X=최초 매수일자(편입일).
 - **분류**: 펀드코드 ∈ `V5202E / V5304R / V6303V / V72026` 또는 펀드명에
   '인덱스' 포함 → **인덱스 재간접주식형**, 그 외 → **액티브 재간접주식형**.
-- **집계**: 분류별 × 종목명별 — 적용평가액 sum, 비중%, 가중평균단가
-  (적용평가액 가중), 최초 매수일.
+- **집계**: 분류별 × 종목명별 — 적용평가액 sum, 비중%, 최초 매수일.
+- **가중평균단가**: ETF 그룹별 `SUM(원취득가액) / SUM(액면수량)` (표준 평균단가).
 - **수익률**: `(현재가 / 가중평균단가 − 1) × 100`
 - **BM**: KOSPI200 (편입일 직후 첫 영업일 종가 → 최신). 인덱스/액티브 모두
   현재 KOSPI200 임시 사용 — 액티브 BM 변경 필요 시 알려주세요.
 - **초과성과**: ETF 수익률 − KOSPI200 수익률.
+- **포트폴리오 비교**: 분류 무관 전체 AP 의 비중 가중 초과성과를
+  저장된 MP 의 비중 가중 초과성과와 비교.
         """)
 
     run = st.button("🚀 분석 실행", type='primary', key='ap_run',
@@ -611,6 +710,9 @@ def _ap_processing_section(df_uni: pd.DataFrame):
 
             with st.spinner(f"{len(agg_df)}개 종목 가격 수집·수익률 계산..."):
                 enriched = _enrich_with_returns(agg_df, bm_close, end_str)
+
+            with st.spinner("저장된 MP 포트폴리오 누적 초과수익률 계산..."):
+                st.session_state['ap_mp_compare'] = _compute_mp_port_excess()
 
             st.session_state['ap_analysis'] = enriched
             st.success(f"✅ 분석 완료 — {len(enriched)}개 종목 (인덱스 / 액티브 분류 표시)")
@@ -684,6 +786,9 @@ def _ap_processing_section(df_uni: pd.DataFrame):
         _render_category('인덱스 재간접주식형')
     with tab_act:
         _render_category('액티브 재간접주식형')
+
+    # ── AP vs MP 포트폴리오 수준 비교 ──────────────────────────────────────
+    _render_ap_mp_comparison(enriched)
 
 
 def _score_color(c: float) -> str:

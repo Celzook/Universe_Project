@@ -63,15 +63,61 @@ def save_mp_local(mp_df: pd.DataFrame, inception_date: str, method: str) -> Tupl
 
 
 def load_mp() -> Optional[dict]:
-    """Load saved MP from local file. Returns None if not found / corrupted."""
+    """Load saved MP.
+
+    우선순위:
+      1) 로컬 파일 `saved_mps/current.json`  (최근 save_mp_local 결과 / 캐시)
+      2) GitHub raw URL fallback             (Streamlit Cloud 컨테이너 재배포 등
+                                              로컬 ephemeral 디스크가 초기화되어도
+                                              repo 에 push 된 MP 가 살아있으면 복원)
+
+    GitHub fetch 성공 시 로컬에도 동일 내용을 즉시 캐싱해서 이후 호출은 O(1).
+    """
     path = _saved_path()
-    if not os.path.exists(path):
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass  # 손상된 파일이면 GitHub 폴백 시도
+
+    data = _fetch_mp_from_github_raw()
+    if data is None:
         return None
+    # 로컬 복원 캐싱 (다음 호출부터 네트워크 미사용)
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        os.makedirs(SAVED_MP_DIR, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return data
+
+
+def _fetch_mp_from_github_raw(branch: str = 'main',
+                              repo: str = DEFAULT_REPO,
+                              timeout: float = 10.0) -> Optional[dict]:
+    """raw.githubusercontent.com 으로 `saved_mps/current.json` 직접 다운로드.
+
+    공개 repo 면 토큰 불필요. 비공개 repo 라면 404/Unauthorized 로 fallback 실패 →
+    호출 측에서 None 처리. Streamlit / requests 어느 쪽이든 사용 가능하도록
+    requests 만 의존.
+    """
+    try:
+        import requests
+    except ImportError:
+        return None
+    url = (
+        f"https://raw.githubusercontent.com/{repo}/{branch}/"
+        f"{SAVED_MP_DIR}/{SAVED_MP_FILE}"
+    )
+    try:
+        r = requests.get(url, timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
     except Exception:
         return None
+    return None
 
 
 def delete_mp() -> bool:
