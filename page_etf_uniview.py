@@ -35,6 +35,7 @@ from momentum_funnel import (
     CORE_TICKER_DEFAULT, CORE_NAME_DEFAULT,
     save_mp_local, load_mp, delete_mp,
     push_to_github, compute_mp_performance,
+    apply_rules, INITIAL_CAPITAL_DEFAULT,
 )
 
 GRID_COLS = 5
@@ -1307,6 +1308,272 @@ def _placeholder_chart(slot_num: int) -> go.Figure:
     return fig
 
 
+# ── 🔄 MP 룰 적용 시뮬레이션 (Phase 1) ────────────────────────────────────
+
+_REBALANCE_HELP = """
+**MP 룰 자동 적용 시뮬** — 저장된 MP 의 편입일부터 오늘까지 룰 1~5 소급·forward.
+
+- **룰 1** BM 누적 초과 ≤ −10% → 50% 손절, ≤ −15% → 전체 손절
+- **룰 2** 손절분은 즉시 TIGER 200 으로 흡수 (교체매매)
+- **룰 3** 편입 후 peak 대비 MDD ≤ −10% → 50% 매도, ≤ −15% → 전체 매도
+- **룰 4** 초기자금 1,000억, 매매 수익률 NAV 합산
+- **룰 5** 활성 satellite < 3 시 신규 top pick (현재 Hot 기준) 보충
+
+기준: D5 더 엄격한 액션 우선 (full > 50%), D7 종가 즉시 체결, D8 매매비용 0.
+"""
+
+
+def _mp_rebalance_section(df_uni: pd.DataFrame):
+    """저장된 MP 에 룰 1~5 적용 → 가상 포지션·NAV·매매 이력."""
+    saved = load_mp()
+    if not saved:
+        return  # 저장본 없을 때 미표시
+
+    st.subheader("🔄 MP 룰 적용 시뮬레이션", help=_REBALANCE_HELP)
+
+    c1, c2, c3 = st.columns([1.5, 1.5, 2])
+    with c1:
+        mode = st.radio(
+            "신규 편입 방법 (룰 5)",
+            options=['A', 'B'],
+            format_func=lambda x: 'A · HotScore Top' if x == 'A' else 'B · Money→RS',
+            horizontal=True,
+            key='mp_sim_mode',
+        )
+    with c2:
+        enable_rule5 = st.checkbox(
+            "룰 5 활성 (Hot 신규 편입)", value=True, key='mp_sim_enable_rule5',
+            help='활성 satellite 가 3 미만일 때 현재 Hot 기준 후보로 보충',
+        )
+    with c3:
+        st.caption(
+            f"편입일 **{saved.get('inception_date', '?')}** · "
+            f"방법 **{saved.get('method', '?')}** · "
+            f"{len(saved.get('positions', []))}개 시작 포지션"
+        )
+
+    if not st.button("▶️ 시뮬 실행", key='mp_sim_run',
+                     help='저장 MP 의 편입일부터 룰 1~5 적용 (네트워크 호출 있음)'):
+        st.info("위 ▶️ 버튼을 눌러 시뮬을 실행하세요. (실행 시 가격 데이터 fetch — 30~60초)")
+        st.markdown("---")
+        return
+
+    try:
+        from etf_universe_builder import naver_get_price_history
+    except Exception as e:
+        st.error(f"가격 어댑터 로드 실패: {e}")
+        return
+
+    # ── 가격 데이터 수집 (saved positions + core + Hot 후보) ─────────────
+    tickers_needed: list = []
+    for p in saved.get('positions', []):
+        tk = str(p.get('ticker', ''))
+        if tk and tk not in tickers_needed:
+            tickers_needed.append(tk)
+    if CORE_TICKER_DEFAULT not in tickers_needed:
+        tickers_needed.append(CORE_TICKER_DEFAULT)
+
+    # 룰 5 후보용: 유니버스 시총 상위 N개 추가 (충분히 넓게)
+    if enable_rule5 and 'ETF명' in df_uni.columns:
+        cap_col = '시가총액(억원)' if '시가총액(억원)' in df_uni.columns else None
+        if cap_col is not None:
+            extra = df_uni.sort_values(cap_col, ascending=False).index.astype(str).tolist()[:30]
+        else:
+            extra = df_uni.index.astype(str).tolist()[:30]
+        for tk in extra:
+            if tk not in tickers_needed:
+                tickers_needed.append(tk)
+
+    inception = str(saved.get('inception_date', ''))
+    try:
+        start_dt = datetime.strptime(inception.replace('-', ''), '%Y%m%d') - timedelta(days=10)
+    except Exception:
+        st.error(f"편입일 파싱 실패: {inception}")
+        return
+    today_dt = datetime.today()
+    start_str = start_dt.strftime('%Y%m%d')
+    end_str = today_dt.strftime('%Y%m%d')
+
+    price_data: dict = {}
+    progress = st.progress(0.0, text=f"📡 가격 시리즈 수집 ({len(tickers_needed)}개)...")
+    for i, tk in enumerate(tickers_needed):
+        try:
+            s = naver_get_price_history(tk, start_str, end_str)
+            if isinstance(s, pd.Series) and not s.empty:
+                price_data[tk] = s.dropna()
+        except Exception:
+            pass
+        progress.progress((i + 1) / len(tickers_needed),
+                          text=f"📡 ({i + 1}/{len(tickers_needed)}) {tk}")
+    progress.empty()
+
+    benchmark = _cached_kospi_close(start_str, end_str)
+    if benchmark.empty:
+        st.error("KOSPI 벤치마크 데이터를 가져오지 못해 시뮬을 중단합니다.")
+        return
+
+    # ── rebalance_fn: 현재 Hot 기준 top pick (룰 5 활성 시) ──────────────
+    rebalance_fn = None
+    candidates: list = []
+    if enable_rule5:
+        try:
+            base_date = st.session_state.get('base_date', today_dt.strftime('%Y%m%d'))
+            hot_metrics, meta_tickers, _ = _cached_hot_run(base_date, len(df_uni), 5)
+            ticker_to_name = (
+                dict(zip(df_uni.index.astype(str), df_uni['ETF명']))
+                if 'ETF명' in df_uni.columns else {}
+            )
+
+            class _MetaOnly:
+                def __init__(self, meta): self.meta = meta
+            market_proxy = _MetaOnly({s: {'tickers': tk} for s, tk in meta_tickers.items()})
+
+            mp_pick = build_mp(
+                hot_metrics, market_proxy, method=mode,
+                core_ticker=CORE_TICKER_DEFAULT, core_name=CORE_NAME_DEFAULT,
+                core_weight=0.875, n_satellites=5,
+                ticker_to_name=ticker_to_name,
+            )
+            for _, row in mp_pick.iterrows():
+                if str(row['role']) == 'Core':
+                    continue
+                candidates.append({
+                    'ticker': str(row['ticker']),
+                    'representative': str(row['representative']),
+                    'category': str(row['category']),
+                })
+            # 후보 가격이 빠져있으면 추가 fetch
+            for c in candidates:
+                tk = c['ticker']
+                if tk and tk not in price_data:
+                    try:
+                        s = naver_get_price_history(tk, start_str, end_str)
+                        if isinstance(s, pd.Series) and not s.empty:
+                            price_data[tk] = s.dropna()
+                    except Exception:
+                        pass
+
+            def _rebalance(_day):
+                return candidates
+            rebalance_fn = _rebalance
+        except Exception as e:
+            st.warning(f"룰 5 비활성: Hot 후보 생성 실패 — {type(e).__name__}: {e}")
+            rebalance_fn = None
+
+    # ── 룰 엔진 실행 ─────────────────────────────────────────────────────
+    with st.spinner("⚙️ 룰 1~5 적용 시뮬 중..."):
+        try:
+            result = apply_rules(
+                saved, today=pd.Timestamp.today(),
+                price_data=price_data, benchmark=benchmark,
+                rebalance_fn=rebalance_fn,
+            )
+        except Exception as e:
+            st.error(f"룰 적용 실패: {type(e).__name__}: {e}")
+            with st.expander("🔍 상세"):
+                import traceback as _tb
+                st.code(_tb.format_exc())
+            return
+
+    if result['daily_positions'].empty:
+        st.warning("시뮬 결과 없음 (편입일 이후 거래일 데이터 부족).")
+        return
+
+    # ── 결과 메트릭 ──────────────────────────────────────────────────────
+    nav = result['cumulative_nav']
+    final_nav = float(nav.iloc[-1]) if not nav.empty else INITIAL_CAPITAL_DEFAULT
+    n_trades = len(result['trade_log'])
+    inception_actual = result['inception']
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("시뮬 시작일", inception_actual.strftime('%Y-%m-%d'))
+    m2.metric("초기자금", f"{INITIAL_CAPITAL_DEFAULT / 1e8:,.0f}억")
+    m3.metric("최종 NAV", f"{final_nav / 1e8:,.1f}억",
+              delta=f"{result['nav_pct']:+.2f}%")
+    m4.metric("매매 횟수", f"{n_trades}회")
+    m5.metric("활성 새틀라이트", f"{result['active_sat_count']}개")
+
+    if result.get('skipped_tickers'):
+        st.caption(f"⚠️ 가격 데이터 없음으로 제외된 티커: {result['skipped_tickers']}")
+
+    # ── NAV 라인차트 ─────────────────────────────────────────────────────
+    nav_df = nav.reset_index()
+    nav_df.columns = ['date', 'NAV (KRW)']
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=nav_df['date'], y=nav_df['NAV (KRW)'] / 1e8,
+        mode='lines', name='가상 NAV', line=dict(color='#4FC3F7', width=2),
+    ))
+    fig.add_hline(
+        y=INITIAL_CAPITAL_DEFAULT / 1e8, line_dash='dash', line_color='#888',
+        annotation_text='초기자금 1,000억', annotation_position='top right',
+    )
+    fig.update_layout(
+        title='가상 포트폴리오 NAV (룰 적용)',
+        height=320, margin=dict(l=40, r=20, t=40, b=30),
+        paper_bgcolor='#0e1117', plot_bgcolor='#111520',
+        xaxis=dict(title='', showgrid=True, gridcolor='#1e2130'),
+        yaxis=dict(title='NAV (억원)', showgrid=True, gridcolor='#1e2130'),
+        hovermode='x unified',
+    )
+    st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
+
+    # ── 현재 가상 포지션 표 ─────────────────────────────────────────────
+    last_row = result['daily_positions'].iloc[-1]
+    pos_rows = []
+    name_map = (
+        dict(zip(df_uni.index.astype(str), df_uni['ETF명']))
+        if 'ETF명' in df_uni.columns else {}
+    )
+    for ticker, weight in last_row.items():
+        if weight <= 0.01:
+            continue
+        state = next((p for p in result['final_positions'] if p['ticker'] == ticker), None)
+        pos_rows.append({
+            '역할': state['role'] if state else '',
+            '티커': ticker,
+            '대표 ETF': (state['representative'] if state and state.get('representative')
+                         else name_map.get(ticker, '')),
+            '카테고리': state['category'] if state else '',
+            '상태': state['status'] if state else '',
+            '비중 %': float(weight),
+        })
+    pos_df = pd.DataFrame(pos_rows).sort_values('비중 %', ascending=False)
+    st.markdown("**📋 현재 가상 포지션 (룰 적용 후)**")
+    st.dataframe(
+        pos_df, width='stretch', hide_index=True,
+        column_config={
+            '비중 %': st.column_config.ProgressColumn(
+                '비중 %', min_value=0.0, max_value=100.0, format='%.2f%%',
+            ),
+        },
+    )
+
+    # ── 매매 이력 expander ──────────────────────────────────────────────
+    with st.expander(f"📜 매매 이력 ({n_trades}건)", expanded=False):
+        if not result['trade_log']:
+            st.caption("매매 이력 없음.")
+        else:
+            tl = pd.DataFrame(result['trade_log'])
+            tl['date'] = pd.to_datetime(tl['date']).dt.strftime('%Y-%m-%d')
+            tl['fraction'] = (tl['fraction'].astype(float) * 100).round(2)
+            tl['metric'] = (tl['metric'].astype(float) * 100).round(2)
+            tl['price'] = tl['price'].astype(float).round(2)
+            tl['proceeds_억'] = (tl['proceeds'].astype(float) / 1e8).round(2)
+            disp = tl[['date', 'ticker', 'representative', 'action',
+                       'fraction', 'metric', 'price', 'proceeds_억', 'replacement']]
+            disp.columns = ['일자', '티커', '대표', '액션', '비중%', '메트릭%',
+                            '체결가', '매매액(억)', '대체']
+            st.dataframe(disp, width='stretch', hide_index=True, height=300)
+            st.caption(
+                "**액션**: rule1_50 / rule1_full = BM 누적초과 손절 / "
+                "rule3_50 / rule3_full = MDD 매도 / rule5_new = 신규 편입. "
+                "**메트릭%**: 룰 1 은 누적 초과수익률, 룰 3 은 peak 대비 drawdown."
+            )
+
+    st.markdown("---")
+
+
 # ── 메인 페이지 함수 ────────────────────────────────────────────────────────
 
 def page_etf_uniview():
@@ -1331,6 +1598,9 @@ def page_etf_uniview():
 
     # ── 🔥 Hot Sectors + Live MP ────────────────────────────────────────────
     _hot_board_section(df_uni)
+
+    # ── 🔄 MP 룰 적용 시뮬레이션 (Phase 1) ────────────────────────────────
+    _mp_rebalance_section(df_uni)
 
     # ── ETF 풀: 국내 유니버스 (시총 상위 순 정렬) ──────────────────────────
     pool_df = df_uni.copy()
