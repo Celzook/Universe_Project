@@ -325,6 +325,32 @@ AP_COL_X_BUY_DATE = 23     # 최초 매수일자 (편입일)
 # 가중평균단가 = SUM(원취득가액) / SUM(액면수량) — ETF 그룹 단위
 
 
+# 액티브 재간접주식형 — 제외 키워드 (해당 종목명 행은 분석에서 drop)
+AP_ACTIVE_EXCLUDE_KEYWORDS = ('더제이 더행복코리아', '더행복코리아 공모펀드')
+
+# 액티브 재간접주식형 — 종목명 통합 매핑 (보통예금 ↔ 은대 → 은대 하나로)
+AP_ACTIVE_NAME_UNIFY = (
+    (('보통예금', '은대'), '은대'),
+)
+
+
+def _should_exclude_active(name: str) -> bool:
+    """액티브 재간접주식형 행에서 제외할 종목명 판정."""
+    if not isinstance(name, str):
+        return False
+    return any(k in name for k in AP_ACTIVE_EXCLUDE_KEYWORDS)
+
+
+def _unify_active_name(name: str) -> str:
+    """액티브 재간접주식형 — '보통예금' 또는 '은대' 포함 시 '은대' 로 통일."""
+    if not isinstance(name, str):
+        return name
+    for keywords, unified in AP_ACTIVE_NAME_UNIFY:
+        if any(k in name for k in keywords):
+            return unified
+    return name
+
+
 def _classify_fund(code: str, name: str) -> str:
     """펀드코드 + 펀드명 → '인덱스 재간접주식형' or '액티브 재간접주식형'."""
     code_clean = str(code).strip().upper()
@@ -444,6 +470,23 @@ def _parse_ap_for_analysis(ap_df: pd.DataFrame, df_uni: pd.DataFrame) -> pd.Data
         return pd.DataFrame()
 
     base['분류'] = [_classify_fund(c, n) for c, n in zip(base['펀드코드'], base['펀드명'])]
+
+    # ── 액티브 재간접주식형 전용 정제 (인덱스 그룹은 손대지 않음) ─────────
+    # (1) 제외 키워드 매치 행 drop
+    is_active = base['분류'] == '액티브 재간접주식형'
+    if is_active.any():
+        excl_mask = is_active & base['종목명'].apply(_should_exclude_active)
+        if excl_mask.any():
+            base = base[~excl_mask].copy()
+    # (2) 보통예금 / 은대 → '은대' 로 종목명 통합 (집계 시 자연스레 합산)
+    is_active = base['분류'] == '액티브 재간접주식형'
+    if is_active.any():
+        base.loc[is_active, '종목명'] = (
+            base.loc[is_active, '종목명'].apply(_unify_active_name)
+        )
+
+    if base.empty:
+        return pd.DataFrame()
 
     if 'ETF명' in df_uni.columns:
         name_to_ticker = {
@@ -918,6 +961,9 @@ def _ap_processing_section(df_uni: pd.DataFrame):
   M=액면수량, Q=원취득가액, S=적용평가액, X=최초 매수일자(편입일).
 - **분류**: 펀드코드 ∈ `V5202E / V5304R / V6303V / V72026` 또는 펀드명에
   '인덱스' 포함 → **인덱스 재간접주식형**, 그 외 → **액티브 재간접주식형**.
+- **액티브 정제** (인덱스 그룹은 적용 X):
+  - 종목명 `더제이 더행복코리아`·`더행복코리아 공모펀드` 행은 제외.
+  - 종목명 `보통예금` 또는 `은대` 포함 행은 `은대` 로 통합 (집계 시 합산).
 - **집계**: 분류별 × 종목명별 — 적용평가액 sum, 비중%, 최초 매수일.
 - **가중평균단가**: ETF 그룹별 `SUM(원취득가액) / SUM(액면수량)` (표준 평균단가).
 - **수익률**: `(현재가 / 가중평균단가 − 1) × 100`
