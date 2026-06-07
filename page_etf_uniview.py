@@ -308,6 +308,384 @@ def _hot_board_section(df_uni: pd.DataFrame):
     st.markdown("---")
 
 
+# ── AP (Actual Portfolio) 분석 헬퍼 ────────────────────────────────────────
+
+# 인덱스 재간접주식형 펀드코드 (사용자 지정 + D열 '인덱스' 키워드 매치)
+INDEX_FUND_CODES = {'V5202E', 'V5304R', 'V6303V', 'V72026'}
+
+# Excel 컬럼 위치 (A=0, B=1, … Z=25)
+AP_COL_C_FUND_CODE = 2    # 펀드코드
+AP_COL_D_FUND_NAME = 3    # 펀드명
+AP_COL_H_STOCK_NAME = 7   # 종목명
+AP_COL_S_VALUE = 18       # 적용평가액
+AP_COL_X_BUY_DATE = 23    # 최초 매수일자 (편입일)
+AP_COL_Z_BUY_PRICE = 25   # 적용단가
+
+
+def _classify_fund(code: str, name: str) -> str:
+    """펀드코드 + 펀드명 → '인덱스 재간접주식형' or '액티브 재간접주식형'."""
+    code_clean = str(code).strip().upper()
+    name_str = str(name) if name is not None else ''
+    if code_clean in INDEX_FUND_CODES or '인덱스' in name_str:
+        return '인덱스 재간접주식형'
+    return '액티브 재간접주식형'
+
+
+def _resolve_ticker_from_name(stock_name: str, name_to_ticker: dict) -> str:
+    """종목명 → 티커. 정확 매칭 우선, 양방향 부분 매칭 fallback."""
+    if not isinstance(stock_name, str):
+        return ''
+    nm = stock_name.strip()
+    if not nm:
+        return ''
+    if nm in name_to_ticker:
+        return name_to_ticker[nm]
+    for ref_name, tk in name_to_ticker.items():
+        if ref_name and (ref_name in nm or nm in ref_name):
+            return tk
+    return ''
+
+
+@st.cache_data(ttl=3600 * 2, show_spinner=False)
+def _cached_etf_close_series(ticker: str, start_str: str, end_str: str) -> pd.Series:
+    """단일 티커 일별 종가 (네이버). 캐시 2h."""
+    from etf_universe_builder import naver_get_price_history
+    return naver_get_price_history(ticker, start_str, end_str)
+
+
+@st.cache_data(ttl=3600 * 2, show_spinner=False)
+def _cached_kospi200_close(start_str: str, end_str: str) -> pd.Series:
+    """KOSPI200 일별 종가. 네이버 (KPI200/KOSPI200) → yfinance ^KS200 폴백."""
+    from etf_universe_builder import naver_get_index_history
+    for sym in ('KPI200', 'KOSPI200'):
+        try:
+            s = naver_get_index_history(sym, start_str, end_str)
+            if isinstance(s, pd.Series) and not s.empty:
+                return s
+        except Exception:
+            pass
+    # yfinance 폴백
+    try:
+        import yfinance as yf
+        s_iso = f"{start_str[:4]}-{start_str[4:6]}-{start_str[6:8]}"
+        e_iso = f"{end_str[:4]}-{end_str[4:6]}-{end_str[6:8]}"
+        df = yf.download('^KS200', start=s_iso, end=e_iso,
+                         progress=False, auto_adjust=True)
+        if not df.empty and 'Close' in df.columns:
+            return df['Close'].squeeze().dropna()
+    except Exception:
+        pass
+    return pd.Series(dtype=float)
+
+
+def _parse_ap_for_analysis(ap_df: pd.DataFrame, df_uni: pd.DataFrame) -> pd.DataFrame:
+    """AP DataFrame → 분류·종목별 집계.
+
+    Returns columns:
+        분류, 종목명, 티커, 적용평가액, 비중%, 편입일(min), 가중평균단가
+    """
+    if ap_df is None or not isinstance(ap_df, pd.DataFrame) or ap_df.empty:
+        return pd.DataFrame()
+
+    n_cols = ap_df.shape[1]
+    needed = max(AP_COL_C_FUND_CODE, AP_COL_D_FUND_NAME, AP_COL_H_STOCK_NAME,
+                 AP_COL_S_VALUE, AP_COL_X_BUY_DATE, AP_COL_Z_BUY_PRICE)
+    if n_cols <= needed:
+        raise ValueError(
+            f"AP 파일 컬럼 수({n_cols})가 부족합니다 — Z열(index {needed})까지 필요."
+        )
+
+    base = pd.DataFrame({
+        '펀드코드': ap_df.iloc[:, AP_COL_C_FUND_CODE].astype(str).str.strip(),
+        '펀드명': ap_df.iloc[:, AP_COL_D_FUND_NAME].astype(str),
+        '종목명': ap_df.iloc[:, AP_COL_H_STOCK_NAME].astype(str).str.strip(),
+        '적용평가액': pd.to_numeric(ap_df.iloc[:, AP_COL_S_VALUE], errors='coerce'),
+        '편입일': pd.to_datetime(ap_df.iloc[:, AP_COL_X_BUY_DATE], errors='coerce'),
+        '적용단가': pd.to_numeric(ap_df.iloc[:, AP_COL_Z_BUY_PRICE], errors='coerce'),
+    })
+    base = base.dropna(subset=['적용평가액', '편입일', '적용단가'])
+    base = base[base['적용평가액'] > 0]
+    base = base[base['종목명'].str.len() > 0]
+    if base.empty:
+        return pd.DataFrame()
+
+    base['분류'] = [_classify_fund(c, n) for c, n in zip(base['펀드코드'], base['펀드명'])]
+
+    if 'ETF명' in df_uni.columns:
+        name_to_ticker = {
+            str(n).strip(): str(t)
+            for t, n in zip(df_uni.index, df_uni['ETF명'])
+            if isinstance(n, str) and n
+        }
+    else:
+        name_to_ticker = {}
+    base['티커'] = base['종목명'].apply(lambda n: _resolve_ticker_from_name(n, name_to_ticker))
+
+    rows = []
+    for cat in ('인덱스 재간접주식형', '액티브 재간접주식형'):
+        sub = base[base['분류'] == cat]
+        if sub.empty:
+            continue
+        total = float(sub['적용평가액'].sum())
+        for nm, g in sub.groupby('종목명'):
+            value_sum = float(g['적용평가액'].sum())
+            tk_series = g['티커'].replace('', np.nan).dropna()
+            ticker = str(tk_series.iloc[0]) if len(tk_series) > 0 else ''
+            w_price = (
+                float((g['적용단가'] * g['적용평가액']).sum() / value_sum)
+                if value_sum > 0 else np.nan
+            )
+            rows.append({
+                '분류': cat,
+                '종목명': nm,
+                '티커': ticker,
+                '적용평가액': value_sum,
+                '비중%': (value_sum / total * 100) if total > 0 else np.nan,
+                '편입일': g['편입일'].min(),
+                '가중평균단가': w_price,
+            })
+    return pd.DataFrame(rows)
+
+
+def _enrich_with_returns(agg_df: pd.DataFrame, bm_close: pd.Series, end_str: str) -> pd.DataFrame:
+    """편입일~오늘 ETF 수익률 + KOSPI200 BM 수익률 + 초과성과 계산."""
+    if agg_df is None or agg_df.empty:
+        return agg_df
+
+    out = agg_df.copy()
+    bm_latest = float(bm_close.iloc[-1]) if not bm_close.empty else np.nan
+
+    cur, ret_pcts, bm_pcts, excess_pcts = [], [], [], []
+    for _, row in out.iterrows():
+        ticker = str(row.get('티커') or '').strip()
+        inception = row.get('편입일')
+        avg_cost = row.get('가중평균단가')
+
+        c_now = np.nan
+        r_pct = np.nan
+        bm_r = np.nan
+
+        if ticker and not pd.isna(inception):
+            start_str = pd.Timestamp(inception).strftime('%Y%m%d')
+            try:
+                close_ser = _cached_etf_close_series(ticker, start_str, end_str)
+            except Exception:
+                close_ser = pd.Series(dtype=float)
+            if isinstance(close_ser, pd.Series) and not close_ser.empty:
+                c_now = float(close_ser.iloc[-1])
+                if avg_cost and not pd.isna(avg_cost) and avg_cost > 0:
+                    r_pct = (c_now / avg_cost - 1.0) * 100
+
+        if not pd.isna(inception) and not bm_close.empty and not np.isnan(bm_latest):
+            inc_ts = pd.Timestamp(inception)
+            after = bm_close.index[bm_close.index >= inc_ts]
+            if len(after) > 0:
+                bm_at = float(bm_close.loc[after[0]])
+                if bm_at > 0:
+                    bm_r = (bm_latest / bm_at - 1.0) * 100
+
+        excess = (r_pct - bm_r) if (not np.isnan(r_pct) and not np.isnan(bm_r)) else np.nan
+
+        cur.append(c_now)
+        ret_pcts.append(r_pct)
+        bm_pcts.append(bm_r)
+        excess_pcts.append(excess)
+
+    out['현재가'] = cur
+    out['수익률%'] = ret_pcts
+    out['BM수익률%'] = bm_pcts
+    out['초과성과%'] = excess_pcts
+    return out
+
+
+def _ap_upload_section():
+    """📤 AP (Actual Portfolio) 엑셀 업로드.
+
+    파일을 읽어 `st.session_state['ap_df']` 에 DataFrame 으로 저장한다.
+    가공 로직은 추후 추가 (현재는 업로드 + 미리보기까지).
+    지원 포맷: .xlsx / .xls / .csv (utf-8, cp949 자동 시도).
+    """
+    has_ap = 'ap_df' in st.session_state and st.session_state['ap_df'] is not None
+
+    with st.expander("📤 AP (Actual Portfolio) 업로드", expanded=not has_ap):
+        col_up, col_meta = st.columns([2, 1])
+        with col_up:
+            uploaded = st.file_uploader(
+                "AP 엑셀 / CSV 선택",
+                type=['xlsx', 'xls', 'csv'],
+                accept_multiple_files=False,
+                key='ap_uploader',
+                help="실 보유 포트폴리오(AP) 파일을 업로드하면 session_state['ap_df'] 에 저장됩니다.",
+            )
+        with col_meta:
+            if has_ap:
+                meta = st.session_state.get('ap_meta', {})
+                st.metric("로드된 행 수", f"{meta.get('rows', '?'):,}")
+                st.caption(f"파일: `{meta.get('name', '?')}`")
+                if st.button("🗑️ 제거", key='ap_clear', help="세션에서 AP 데이터 제거"):
+                    st.session_state['ap_df'] = None
+                    st.session_state['ap_meta'] = None
+                    st.rerun()
+
+        if uploaded is not None:
+            try:
+                ext = uploaded.name.rsplit('.', 1)[-1].lower()
+                if ext == 'csv':
+                    # 인코딩 자동 시도 (utf-8 → utf-8-sig → cp949)
+                    raw = uploaded.read()
+                    for enc in ('utf-8', 'utf-8-sig', 'cp949', 'euc-kr'):
+                        try:
+                            from io import BytesIO
+                            ap_df = pd.read_csv(BytesIO(raw), encoding=enc)
+                            break
+                        except (UnicodeDecodeError, UnicodeError):
+                            continue
+                    else:
+                        st.error("CSV 인코딩 감지 실패 (utf-8/cp949 모두 실패)")
+                        return
+                else:
+                    ap_df = pd.read_excel(uploaded)
+            except Exception as e:
+                st.error(f"파일 파싱 실패: {type(e).__name__}: {e}")
+                return
+
+            st.session_state['ap_df'] = ap_df
+            st.session_state['ap_meta'] = {
+                'name': uploaded.name,
+                'rows': len(ap_df),
+                'cols': list(ap_df.columns),
+            }
+            st.success(f"✅ 업로드 완료 — {len(ap_df)}행 × {len(ap_df.columns)}열")
+
+        # 미리보기 — 업로드 후 또는 기존 세션 데이터 있을 때
+        ap_df = st.session_state.get('ap_df')
+        if isinstance(ap_df, pd.DataFrame) and not ap_df.empty:
+            st.caption(f"컬럼: `{', '.join(map(str, ap_df.columns))}`")
+            st.dataframe(ap_df.head(20), width='stretch', height=300)
+            st.caption("👉 가공 로직은 추후 연결 — `st.session_state['ap_df']` 로 접근 가능.")
+
+
+def _ap_processing_section(df_uni: pd.DataFrame):
+    """🔬 AP 초과성과 분석 — 업로드된 ap_df 가 있을 때만 표시."""
+    ap_df = st.session_state.get('ap_df')
+    if not isinstance(ap_df, pd.DataFrame) or ap_df.empty:
+        return
+
+    st.subheader("🔬 AP 초과성과 분석")
+    with st.expander("📐 분석 규칙", expanded=False):
+        st.markdown("""
+- **컬럼 매핑** (Excel 위치 기준): C=펀드코드, D=펀드명, H=종목명, S=적용평가액,
+  X=최초 매수일자(편입일), Z=적용단가.
+- **분류**: 펀드코드 ∈ `V5202E / V5304R / V6303V / V72026` 또는 펀드명에
+  '인덱스' 포함 → **인덱스 재간접주식형**, 그 외 → **액티브 재간접주식형**.
+- **집계**: 분류별 × 종목명별 — 적용평가액 sum, 비중%, 가중평균단가
+  (적용평가액 가중), 최초 매수일.
+- **수익률**: `(현재가 / 가중평균단가 − 1) × 100`
+- **BM**: KOSPI200 (편입일 직후 첫 영업일 종가 → 최신). 인덱스/액티브 모두
+  현재 KOSPI200 임시 사용 — 액티브 BM 변경 필요 시 알려주세요.
+- **초과성과**: ETF 수익률 − KOSPI200 수익률.
+        """)
+
+    run = st.button("🚀 분석 실행", type='primary', key='ap_run',
+                    help="네이버 + yfinance 가격 수집 → 종목별 초과성과 계산. 첫 실행 30~90초.")
+
+    if run:
+        try:
+            with st.spinner("AP 파싱·분류·집계 중..."):
+                agg_df = _parse_ap_for_analysis(ap_df, df_uni)
+            if agg_df.empty:
+                st.warning("AP 데이터에서 유효 행을 찾지 못했습니다 "
+                           "(적용평가액·편입일·적용단가 결측 또는 0).")
+                st.session_state['ap_analysis'] = None
+                return
+
+            end_str = datetime.today().strftime('%Y%m%d')
+            min_incept = pd.Timestamp(agg_df['편입일'].min())
+            bm_start = (min_incept - pd.Timedelta(days=10)).strftime('%Y%m%d')
+
+            with st.spinner("KOSPI200 BM 가격 수집..."):
+                bm_close = _cached_kospi200_close(bm_start, end_str)
+            if bm_close.empty:
+                st.error("KOSPI200 가격 수집 실패 (네이버·yfinance 모두 응답 없음). "
+                         "BM 수익률은 NaN 으로 채워집니다.")
+
+            with st.spinner(f"{len(agg_df)}개 종목 가격 수집·수익률 계산..."):
+                enriched = _enrich_with_returns(agg_df, bm_close, end_str)
+
+            st.session_state['ap_analysis'] = enriched
+            st.success(f"✅ 분석 완료 — {len(enriched)}개 종목 (인덱스 / 액티브 분류 표시)")
+        except Exception as e:
+            st.error(f"분석 실패: {type(e).__name__}: {e}")
+            return
+
+    enriched = st.session_state.get('ap_analysis')
+    if not isinstance(enriched, pd.DataFrame) or enriched.empty:
+        st.caption("👆 **분석 실행** 버튼을 눌러주세요.")
+        return
+
+    tab_idx, tab_act = st.tabs(['🟢 인덱스 재간접주식형', '🔵 액티브 재간접주식형'])
+
+    def _render_category(label: str):
+        sub = enriched[enriched['분류'] == label]
+        if sub.empty:
+            st.info(f"{label} 카테고리에 해당 종목이 없습니다.")
+            return
+
+        total_val = float(sub['적용평가액'].sum())
+        valid = sub.dropna(subset=['초과성과%'])
+        if not valid.empty and valid['적용평가액'].sum() > 0:
+            wavg_excess = float(
+                (valid['초과성과%'] * valid['적용평가액']).sum()
+                / valid['적용평가액'].sum()
+            )
+        else:
+            wavg_excess = np.nan
+        n_unmapped = int((sub['티커'] == '').sum() + sub['현재가'].isna().sum()
+                         - ((sub['티커'] == '') & sub['현재가'].isna()).sum())
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("종목 수", f"{len(sub)}")
+        c2.metric("총 적용평가액", f"{total_val:,.0f}")
+        c3.metric("비중 가중 초과성과 (vs KOSPI200)",
+                  f"{wavg_excess:+.2f}%" if not np.isnan(wavg_excess) else "N/A")
+        c4.metric("매핑/가격 실패", f"{n_unmapped}개")
+
+        view = sub[['종목명', '티커', '적용평가액', '비중%', '편입일', '가중평균단가',
+                    '현재가', '수익률%', 'BM수익률%', '초과성과%']].copy()
+        view['편입일'] = pd.to_datetime(view['편입일']).dt.strftime('%Y-%m-%d')
+        st.dataframe(
+            view.sort_values('비중%', ascending=False),
+            width='stretch', hide_index=True, height=440,
+            column_config={
+                '적용평가액': st.column_config.NumberColumn('적용평가액', format='%,.0f'),
+                '비중%': st.column_config.ProgressColumn(
+                    '비중 %', min_value=0.0, max_value=100.0, format='%.2f%%'),
+                '가중평균단가': st.column_config.NumberColumn('가중평균단가', format='%,.2f'),
+                '현재가': st.column_config.NumberColumn('현재가', format='%,.2f'),
+                '수익률%': st.column_config.NumberColumn('수익률 %', format='%+.2f'),
+                'BM수익률%': st.column_config.NumberColumn('BM(KOSPI200) %', format='%+.2f'),
+                '초과성과%': st.column_config.NumberColumn('초과성과 %', format='%+.2f'),
+            },
+        )
+
+        unmapped = sub[(sub['티커'] == '') | sub['현재가'].isna()]
+        if not unmapped.empty:
+            with st.expander(f"⚠️ 가격 매핑/수집 실패 종목 {len(unmapped)}개"):
+                st.dataframe(
+                    unmapped[['종목명', '티커', '적용평가액', '편입일']],
+                    width='stretch', hide_index=True,
+                )
+                st.caption(
+                    "원인: 종목명이 국내 유니버스에 없음 (해외 ETF 등) 또는 "
+                    "네이버에서 해당 종목 시계열 미제공."
+                )
+
+    with tab_idx:
+        _render_category('인덱스 재간접주식형')
+    with tab_act:
+        _render_category('액티브 재간접주식형')
+
+
 def _score_color(c: float) -> str:
     if np.isnan(c):
         return '#888888'
@@ -476,6 +854,10 @@ def page_etf_uniview():
     if df_uni is None or df_uni.empty:
         st.warning("유니버스 데이터가 없습니다. 다시 빌드해 주세요.")
         return
+
+    # ── 📤 AP (Actual Portfolio) 업로드 + 🔬 분석 ──────────────────────────
+    _ap_upload_section()
+    _ap_processing_section(df_uni)
 
     # ── 📌 저장된 MP (편입일 기준 성과 추적) — 저장본 있을 때만 표시 ──────
     _saved_mp_section()
