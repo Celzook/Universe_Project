@@ -1,8 +1,0 @@
-# Reflex 전용 의존성 — 기존 requirements.txt (Streamlit) 와 분리.
-# Streamlit Cloud 는 이 파일을 무시하고, Reflex Cloud / GitHub Actions 만 사용.
-reflex>=0.6
-# 데이터 레이어 공유 (Streamlit-free 모듈만 import) — 호환 위해 명시.
-pandas>=1.5
-numpy
-requests
-lxml
