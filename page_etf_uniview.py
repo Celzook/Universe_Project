@@ -8,6 +8,8 @@ ETF Uniview Page
 - C_score 오버레이 (etf_scoring 모듈)
 - 하단 랭킹 보드: ETF C_score 상위/하위 15, 카테고리 평균 상위/하위 15
 """
+import hashlib
+import json
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -101,14 +103,18 @@ def _saved_mp_section():
     def _fetch_kospi(s, e):
         return naver_get_index_history('KOSPI', s, e)
 
+    # 캐시 키: saved 전체 내용 hash 포함 → saved 가 바뀌면 자동 invalidation
+    # `_saved` (밑줄 시작 인자) 는 Streamlit 이 해싱하지 않음 → payload 전달용
     @st.cache_data(ttl=3600, show_spinner=False)
-    def _cached_perf(inception_key: str, tickers_key: tuple):
-        return compute_mp_performance(saved, _fetch_close, _fetch_kospi)
+    def _cached_perf(saved_hash: str, inception_key: str, tickers_key: tuple, _saved: dict):
+        return compute_mp_performance(_saved, _fetch_close, _fetch_kospi)
 
     with st.spinner("📡 저장 MP 성과 계산 (편입일 기준 forward)..."):
         try:
+            saved_json = json.dumps(saved, ensure_ascii=False, sort_keys=True, default=str)
+            saved_hash = hashlib.md5(saved_json.encode('utf-8')).hexdigest()[:12]
             tickers_key = tuple(str(p.get('ticker','')) for p in saved.get('positions', []))
-            perf = _cached_perf(inception, tickers_key)
+            perf = _cached_perf(saved_hash, inception, tickers_key, saved)
         except Exception as e:
             st.error(f"성과 계산 실패: {e}")
             return

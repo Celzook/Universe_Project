@@ -18,8 +18,10 @@ import os, pickle
 # 미국 상장 ETF 유니버스 (지수 대용 포함)
 # ============================================================================
 GLOBAL_INDICES = {
-    # 지수 대용 ETF (미국 상장) — 18개
-    'KOSPI':      {'ticker': 'EWY',   'name': 'iShares MSCI Korea',       'country': '한국'},
+    # 지수 (실제 지수 심볼) ──────────────────────────────────────────────
+    'KOSPI':      {'ticker': '^KS11', 'name': 'KOSPI 종합지수',          'country': '한국'},
+    # 지수 대용 ETF (미국 상장) ─────────────────────────────────────────
+    'Korea (EWY)':{'ticker': 'EWY',   'name': 'iShares MSCI Korea',      'country': '한국'},
     'S&P500':     {'ticker': 'SPY',   'name': 'SPDR S&P 500',            'country': '미국'},
     'NASDAQ':     {'ticker': 'QQQ',   'name': 'Invesco NASDAQ 100',      'country': '미국'},
     'Dow Jones':  {'ticker': 'DIA',   'name': 'SPDR Dow Jones',          'country': '미국'},
@@ -135,9 +137,12 @@ def collect_global_prices(cache_dir="./etf_cache", years=3, progress_callback=No
     end_date = datetime.today()
     start_date = end_date - timedelta(days=365 * years + 30)
 
-    # 전체 티커 (중복 제거)
-    all_tickers = sorted(set(US_ETFS.keys()))
-    print(f"  📡 yfinance 배치 다운로드: {len(all_tickers)}개 ETF, {years}년")
+    # 전체 티커 (US ETF + 실제 지수 심볼, 중복 제거)
+    # GLOBAL_INDICES 중 '^'로 시작하는 항목(실제 지수)을 yfinance 배치에 포함
+    index_tickers = {info['ticker'] for info in GLOBAL_INDICES.values()
+                     if info['ticker'].startswith('^')}
+    all_tickers = sorted(set(US_ETFS.keys()) | index_tickers)
+    print(f"  📡 yfinance 배치 다운로드: {len(all_tickers)}개 ETF/지수, {years}년")
 
     try:
         raw = yf.download(all_tickers, start=start_date, end=end_date,

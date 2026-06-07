@@ -16,7 +16,10 @@ from ..contracts import MarketData, OHLCV_COLS, METRICS_COLS
 
 def _trading_index(n_days: int, end: Optional[pd.Timestamp] = None) -> pd.DatetimeIndex:
     end = end or pd.Timestamp.today().normalize()
-    # 주말 제외 영업일(휴장일 무시 — 더미용)
+    # end 가 주말이면 직전 영업일로 백트래킹 (pandas 2.x 에서 bdate_range 가
+    # end=주말 인 경우 periods 보다 1 적게 반환하는 케이스 회피)
+    while end.weekday() >= 5:  # Sat=5, Sun=6
+        end -= pd.Timedelta(days=1)
     return pd.bdate_range(end=end, periods=n_days)
 
 

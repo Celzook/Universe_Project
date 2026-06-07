@@ -14,16 +14,13 @@ import gc, traceback, io
 st.set_page_config(page_title="ETF Universe Explorer", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
 
-# 글로벌 스타일 (Pretendard 폰트 + 카드 그림자/모서리)
+# 글로벌 스타일 (Pretendard 폰트 + 카드 그림자/모서리) + 색상 상수
 try:
-    from style import inject_global_styles
+    from style import inject_global_styles, UP_COLOR, DOWN_COLOR
     inject_global_styles()
-except Exception:
-    pass
-
-# 한국식 색상 컨벤션 (상승=빨강, 하락=파랑) — 차트 전반에 일관 적용
-UP_COLOR   = '#e74c3c'   # 빨강 (상승/양수)
-DOWN_COLOR = '#3498db'   # 파랑 (하락/음수)
+except ImportError:
+    UP_COLOR = '#e74c3c'
+    DOWN_COLOR = '#3498db'
 
 from etf_universe_builder import build_universe, Config, diagnose
 from global_price_collector import (

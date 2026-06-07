@@ -15,10 +15,11 @@ import numpy as np
 import streamlit as st
 from datetime import datetime, timedelta
 
-
-# 한국식 색상 (rise=red, fall=blue)
-UP_COLOR = '#e74c3c'
-DOWN_COLOR = '#3498db'
+try:
+    from style import UP_COLOR, DOWN_COLOR
+except ImportError:
+    UP_COLOR = '#e74c3c'
+    DOWN_COLOR = '#3498db'
 
 # ETF 브랜드 prefix → 운용사 매핑
 ETF_BRAND_TO_MANAGER = {

@@ -72,13 +72,17 @@ def compute_hot_metrics(
             continue
 
         # VolRatio: 최근 3일 거래대금 평균 / 20일 평균
+        # NOTE: df['volume'] 은 data_adapter._aggregate_sector 에서 sum(close*shares)
+        #       으로 합산된 거래대금(KRW) proxy 이지 raw 좌수가 아님.
         vol_recent = df['volume'].tail(vol_recent_n).mean()
         vol_base = df['volume'].tail(vol_window).mean()
         vol_ratio = float(vol_recent / vol_base) if vol_base and vol_base > 0 else np.nan
 
         # MoneyFlow: 5일 누적 net flow / total flow ∈ [-1, +1]
+        # df['volume'] 이 이미 거래대금(KRW) 단위이므로 TP 를 곱하지 않음 (이중 계상 방지).
+        # 방향성은 TP 의 일별 diff 로 양/음수 buckets 분류.
         tp = (df['high'] + df['low'] + df['close']) / 3.0
-        raw_mf = tp * df['volume']
+        raw_mf = df['volume']
         tp_diff = tp.diff()
         recent_raw = raw_mf.tail(money_window)
         recent_diff = tp_diff.tail(money_window)

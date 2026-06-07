@@ -134,8 +134,8 @@ def fetch_macro_scores() -> dict:
                 vix_z = 0.0
             scores['vix'] = float(np.clip(vix_z, -3, 3))
             details['VIX'] = round(vix_latest, 2)
-    except Exception:
-        pass
+    except Exception as e:
+        details['VIX_error'] = f"{type(e).__name__}: {str(e)[:100]}"
 
     # WTI (CL=F) → 52-week z-score → [-3, +3]
     try:
@@ -152,8 +152,8 @@ def fetch_macro_scores() -> dict:
                 wti_z = 0.0
             scores['oil'] = float(np.clip(wti_z, -3, 3))
             details['WTI'] = round(wti_latest, 2)
-    except Exception:
-        pass
+    except Exception as e:
+        details['WTI_error'] = f"{type(e).__name__}: {str(e)[:100]}"
 
     # BEI proxy: 10Y Treasury (^TNX) / 4 → rough inflation expectations [-3, +3]
     try:
@@ -164,8 +164,8 @@ def fetch_macro_scores() -> dict:
             bei_val = float(tnx.iloc[-1]) / 4.0
             scores['bei'] = float(np.clip(bei_val, -3, 3))
             details['10Y_TNX'] = round(float(tnx.iloc[-1]), 3)
-    except Exception:
-        pass
+    except Exception as e:
+        details['BEI_error'] = f"{type(e).__name__}: {str(e)[:100]}"
 
     # Fed Rate proxy: ZQ=F (30-day Fed funds futures), implied_rate = 100 - price
     try:
@@ -177,8 +177,8 @@ def fetch_macro_scores() -> dict:
             fed_score = (implied_rate - 5.0) / 2.0   # centred at 5%, ±1.5 per 1%
             scores['fed'] = float(np.clip(fed_score, -3, 3))
             details['Fed_implied_rate'] = round(implied_rate, 3)
-    except Exception:
-        pass
+    except Exception as e:
+        details['Fed_error'] = f"{type(e).__name__}: {str(e)[:100]}"
 
     # GPR: not available via yfinance → neutral (0)
     scores['geo'] = 0.0
@@ -242,19 +242,21 @@ def fetch_kr_ohlcv_batch(tickers: tuple, months: int = 6) -> dict:
     return result
 
 
-@st.cache_data(ttl=3600 * 2, show_spinner=False)
-def score_all_kr_etfs(all_tickers: tuple) -> pd.DataFrame:
-    """Score Korean ETFs using .KS yfinance data."""
-    macro = fetch_macro_scores()
-    M_score = macro['M_score']
-    ohlcv_dict = fetch_kr_ohlcv_batch(all_tickers, months=6)
+def _score_etfs_from_data(all_tickers: tuple, ohlcv_dict: dict,
+                          M_score: float, close_key: str = 'Close') -> pd.DataFrame:
+    """Pure scoring helper — no I/O, no caching.
+
+    Computes T_score / C_score for each ticker using the provided OHLCV dict.
+    Called by `score_all_kr_etfs` and `score_all_etfs` after their respective
+    cached fetchers populate the data.
+    """
     rows = []
     for ticker in all_tickers:
         df_t = ohlcv_dict.get(ticker, pd.DataFrame())
-        if df_t.empty or 'Close' not in df_t.columns:
+        if df_t.empty or close_key not in df_t.columns:
             rows.append({'ticker': ticker, 'T_score': np.nan, 'C_score': np.nan})
             continue
-        close = df_t['Close'].squeeze().dropna()
+        close = df_t[close_key].squeeze().dropna()
         T = compute_T_score(close)
         C = compute_C_score(T, M_score)
         rows.append({
@@ -263,6 +265,19 @@ def score_all_kr_etfs(all_tickers: tuple) -> pd.DataFrame:
             'C_score': round(C, 2) if not np.isnan(C) else np.nan,
         })
     return pd.DataFrame(rows).set_index('ticker')
+
+
+def score_all_kr_etfs(all_tickers: tuple) -> pd.DataFrame:
+    """Score Korean ETFs using .KS yfinance data.
+
+    Thin wrapper — actual I/O is cached inside `fetch_macro_scores` and
+    `fetch_kr_ohlcv_batch`. Scoring itself is fast and runs every call,
+    avoiding the nested-cache trap (cached wrapper around cached fetchers
+    produces hard-to-invalidate stale results).
+    """
+    macro = fetch_macro_scores()
+    ohlcv_dict = fetch_kr_ohlcv_batch(all_tickers, months=6)
+    return _score_etfs_from_data(all_tickers, ohlcv_dict, macro['M_score'])
 
 
 @st.cache_data(ttl=3600 * 2, show_spinner=False)
@@ -301,29 +316,14 @@ def fetch_ohlcv_batch(tickers: tuple, months: int = 3) -> dict:
 
 # ─── Batch scoring ─────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=3600 * 2, show_spinner=False)
 def score_all_etfs(all_tickers: tuple) -> pd.DataFrame:
     """
     Score every ticker in all_tickers.
     Returns DataFrame indexed by ticker with columns [T_score, C_score].
+
+    Thin wrapper — caching lives inside `fetch_macro_scores` / `fetch_ohlcv_batch`.
+    See `score_all_kr_etfs` docstring for the rationale.
     """
     macro = fetch_macro_scores()
-    M_score = macro['M_score']
-
     ohlcv_dict = fetch_ohlcv_batch(all_tickers, months=6)
-
-    rows = []
-    for ticker in all_tickers:
-        df_t = ohlcv_dict.get(ticker, pd.DataFrame())
-        if df_t.empty or 'Close' not in df_t.columns:
-            rows.append({'ticker': ticker, 'T_score': np.nan, 'C_score': np.nan})
-            continue
-        close = df_t['Close'].squeeze().dropna()
-        T = compute_T_score(close)
-        C = compute_C_score(T, M_score)
-        rows.append({
-            'ticker': ticker,
-            'T_score': round(T, 2) if not np.isnan(T) else np.nan,
-            'C_score': round(C, 2) if not np.isnan(C) else np.nan,
-        })
-    return pd.DataFrame(rows).set_index('ticker')
+    return _score_etfs_from_data(all_tickers, ohlcv_dict, macro['M_score'])

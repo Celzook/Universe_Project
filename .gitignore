@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+.Python
+
+# Streamlit cache / output
+etf_cache/
+etf_universe_output/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Windows Zone.Identifier metadata (WSL)
+*:Zone.Identifier
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OMC / claude artifacts
+.omc/
+.claude/
+
+# Local notebooks
+*.ipynb_checkpoints/
+
+# Saved MPs are intentionally tracked (saved_mps/current.json) — do NOT ignore.

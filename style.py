@@ -5,6 +5,10 @@ Global UI styles — Pretendard 폰트 + 카드 그림자/모서리 + 한국식 
 """
 import streamlit as st
 
+# 한국식 색상 컨벤션 (상승=빨강, 하락=파랑) — 차트/지표 전반에 일관 적용
+UP_COLOR = '#e74c3c'    # 빨강 (상승/양수)
+DOWN_COLOR = '#3498db'  # 파랑 (하락/음수)
+
 
 _GLOBAL_CSS = """
 <style>

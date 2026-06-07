@@ -167,7 +167,9 @@ def naver_get_ohlcv_history(
         from etf_universe_builder import _http_get  # 지연 임포트 (tqdm 등 무거운 의존성)
         text = _http_get(url, encoding='utf-8')
         return _parse_naver_chart_ohlcv(text)
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"naver OHLCV fetch failed for {ticker}: {type(e).__name__}: {e}",
+                      stacklevel=2)
         return pd.DataFrame(columns=OHLCV_COLS)
 
 
@@ -222,11 +224,15 @@ def _yf_ohlcv(tickers: List[str], months: int) -> Dict[str, pd.DataFrame]:
                         df_t[c] = np.nan
                 df_t.index.name = 'date'
                 result[orig] = df_t[OHLCV_COLS].copy()
-            except Exception:
+            except Exception as e:
+                warnings.warn(f"yfinance per-ticker parse failed for {orig}: "
+                              f"{type(e).__name__}: {e}", stacklevel=2)
                 continue
 
         return result
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"yfinance batch download failed ({len(tickers)} tickers): "
+                      f"{type(e).__name__}: {e}", stacklevel=2)
         return {}
 
 
