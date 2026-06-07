@@ -8,3 +8,5 @@ yfinance
 streamlit
 plotly
 lxml
+# Reflex 는 reflex-deploy-action 의 가드 체크 통과용. Streamlit 런타임은 사용 X.
+reflex>=0.6
