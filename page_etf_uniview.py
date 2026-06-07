@@ -553,7 +553,8 @@ def _enrich_with_returns(agg_df: pd.DataFrame,
     }
 
     today_ts = pd.Timestamp.today().normalize()
-    cur, ret_pcts, bm_pcts, excess_pcts, bm_names, hold_days = [], [], [], [], [], []
+    cur, avg_ret_pcts, etf_ret_pcts, bm_pcts, excess_pcts = [], [], [], [], []
+    bm_names, hold_days = [], []
     for _, row in out.iterrows():
         ticker = str(row.get('티커') or '').strip()
         inception = row.get('편입일')
@@ -572,7 +573,8 @@ def _enrich_with_returns(agg_df: pd.DataFrame,
         bm_name = _BM_NAME_BY_CATEGORY.get(category, '?')
 
         c_now = np.nan
-        r_pct = np.nan
+        avg_ret = np.nan    # 평단_수익률% = (현재가 / 가중평균단가 − 1) × 100
+        etf_ret = np.nan    # ETF 수익률% = (현재가 / 편입일 ETF 종가 − 1) × 100
         bm_r = np.nan
 
         if ticker and not pd.isna(inception):
@@ -583,8 +585,11 @@ def _enrich_with_returns(agg_df: pd.DataFrame,
                 close_ser = pd.Series(dtype=float)
             if isinstance(close_ser, pd.Series) and not close_ser.empty:
                 c_now = float(close_ser.iloc[-1])
+                etf_at_inc = float(close_ser.iloc[0])
                 if avg_cost and not pd.isna(avg_cost) and avg_cost > 0:
-                    r_pct = (c_now / avg_cost - 1.0) * 100
+                    avg_ret = (c_now / avg_cost - 1.0) * 100
+                if etf_at_inc > 0:
+                    etf_ret = (c_now / etf_at_inc - 1.0) * 100
 
         if not pd.isna(inception) and isinstance(bm_close, pd.Series) \
                 and not bm_close.empty and not np.isnan(bm_latest):
@@ -595,20 +600,23 @@ def _enrich_with_returns(agg_df: pd.DataFrame,
                 if bm_at > 0:
                     bm_r = (bm_latest / bm_at - 1.0) * 100
 
-        excess = (r_pct - bm_r) if (not np.isnan(r_pct) and not np.isnan(bm_r)) else np.nan
+        # 초과성과 = ETF 수익률 − BM 수익률 (시장 baseline 기준, apples-to-apples)
+        excess = (etf_ret - bm_r) if (not np.isnan(etf_ret) and not np.isnan(bm_r)) else np.nan
 
         cur.append(c_now)
-        ret_pcts.append(r_pct)
+        avg_ret_pcts.append(avg_ret)
+        etf_ret_pcts.append(etf_ret)
         bm_pcts.append(bm_r)
         excess_pcts.append(excess)
         bm_names.append(bm_name)
 
     out['보유기간(일)'] = hold_days
     out['현재가'] = cur
-    out['수익률%'] = ret_pcts
+    out['평단_수익률%'] = avg_ret_pcts   # 실제 매수 대비
+    out['ETF수익률%'] = etf_ret_pcts     # 편입일 시장가 대비 (ETF index 자체 변동)
     out['BM명'] = bm_names
     out['BM수익률%'] = bm_pcts
-    out['초과성과%'] = excess_pcts
+    out['초과성과%'] = excess_pcts        # = ETF수익률% − BM수익률% (시장 baseline)
     return out
 
 
@@ -931,10 +939,10 @@ def _render_ap_mp_comparison(enriched: pd.DataFrame):
             (valid['초과성과%'] * valid['적용평가액']).sum()
             / valid['적용평가액'].sum()
         )
-        # 단순 수익률(비교용)
-        valid_r = enriched.dropna(subset=['수익률%'])
+        # 평단 수익률(실 보유 수익) 비중 가중
+        valid_r = enriched.dropna(subset=['평단_수익률%'])
         ap_ret = (
-            float((valid_r['수익률%'] * valid_r['적용평가액']).sum()
+            float((valid_r['평단_수익률%'] * valid_r['적용평가액']).sum()
                   / valid_r['적용평가액'].sum())
             if not valid_r.empty and valid_r['적용평가액'].sum() > 0 else np.nan
         )
@@ -946,13 +954,15 @@ def _render_ap_mp_comparison(enriched: pd.DataFrame):
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(
-        "AP 비중 가중 수익률",
+        "AP 비중 가중 평단 수익률",
         f"{ap_ret:+.2f}%" if not np.isnan(ap_ret) else "N/A",
+        help="(현재가 / 가중평균단가 − 1) 의 비중 가중 평균 — 실제 보유 수익",
     )
     c2.metric(
         "AP 비중 가중 초과성과 (혼합 BM)",
         f"{ap_excess:+.2f}%" if not np.isnan(ap_excess) else "N/A",
-        help="인덱스 = vs KOSPI200, 액티브 = vs KOSPI 의 비중 가중 평균",
+        help="ETF 수익률 − BM 수익률 (시장 baseline). "
+             "인덱스 = vs KOSPI200, 액티브 = vs KOSPI 의 비중 가중 평균",
     )
     if mp_info:
         c3.metric(
@@ -995,13 +1005,18 @@ def _ap_processing_section(df_uni: pd.DataFrame):
   - 종목명 `보통예금` 또는 `은대` 포함 행은 `은대` 로 통합 (집계 시 합산).
 - **집계**: 분류별 × 종목명별 — 적용평가액 sum, 비중%, 최초 매수일.
 - **가중평균단가**: ETF 그룹별 `SUM(원취득가액) / SUM(액면수량)` (표준 평균단가).
-- **수익률**: `(현재가 / 가중평균단가 − 1) × 100`
+- **두 가지 수익률** (둘 다 편입일 → 오늘 누적):
+  - **평단 수익률** = `(현재가 / 가중평균단가 − 1) × 100` — 실제 매수 단가
+    대비, 회원님 보유분 실 수익.
+  - **ETF 수익률** = `(현재가 / 편입일 직후 첫 영업일 ETF 종가 − 1) × 100`
+    — ETF 자체 시장가 변동 (시장 baseline).
 - **BM** (분류별 분리):
   - 인덱스 재간접주식형 → **KOSPI200** (네이버 KPI200 / yfinance `^KS200`)
   - 액티브 재간접주식형 → **KOSPI** (네이버 KOSPI / yfinance `^KS11`)
   - 둘 다 실제 지수 데이터 (EWY 등 ETF 대용 아님). 편입일 직후 첫 영업일
     종가 → 최신 종가 비교.
-- **초과성과**: ETF 수익률 − 해당 분류 BM 수익률 (행별 `BM명` 컬럼 참고).
+- **초과성과**: **`ETF 수익률 − BM 수익률`** — 시장 baseline 끼리 비교
+  (apples-to-apples). 매수 시점·평단가 영향 배제.
 - **포트폴리오 비교**: 전체 AP 비중 가중 초과성과(혼합 BM)를 저장 MP
   비중 가중 초과성과(KOSPI BM)와 대조.
         """)
@@ -1082,25 +1097,35 @@ def _ap_processing_section(df_uni: pd.DataFrame):
         c4.metric("매핑/가격 실패", f"{n_unmapped}개")
 
         view = sub[['종목명', '티커', '적용평가액', '비중%', '편입일', '보유기간(일)',
-                    '가중평균단가', '현재가', '수익률%', 'BM명', 'BM수익률%',
-                    '초과성과%']].copy()
+                    '가중평균단가', '현재가', '평단_수익률%', 'ETF수익률%',
+                    'BM명', 'BM수익률%', '초과성과%']].copy()
         view['편입일'] = pd.to_datetime(view['편입일']).dt.strftime('%Y-%m-%d')
+        # 행 개수에 맞춰 동적 높이 — 빈 행 padding 제거
+        n_rows = max(1, len(view))
+        dyn_h = min(600, 38 + 35 * n_rows + 4)
         st.dataframe(
             view.sort_values('비중%', ascending=False),
-            width='stretch', hide_index=True, height=440,
+            width='stretch', hide_index=True, height=dyn_h,
             column_config={
                 '적용평가액': st.column_config.NumberColumn('적용평가액', format='%,.0f'),
                 '비중%': st.column_config.ProgressColumn(
                     '비중 %', min_value=0.0, max_value=100.0, format='%.2f%%'),
                 '보유기간(일)': st.column_config.NumberColumn(
                     '보유기간 (일)', format='%d',
-                    help="편입일 → 오늘. 수익률·BM수익률 모두 이 기간의 누적값입니다."),
+                    help="편입일 → 오늘. 모든 수익률은 이 기간 누적."),
                 '가중평균단가': st.column_config.NumberColumn('가중평균단가', format='%,.2f'),
                 '현재가': st.column_config.NumberColumn('현재가', format='%,.2f'),
-                '수익률%': st.column_config.NumberColumn('수익률 %', format='%+.2f'),
+                '평단_수익률%': st.column_config.NumberColumn(
+                    '평단 수익률 %', format='%+.2f',
+                    help="(현재가 / 가중평균단가 − 1) × 100 — 실제 매수 단가 대비"),
+                'ETF수익률%': st.column_config.NumberColumn(
+                    'ETF 수익률 %', format='%+.2f',
+                    help="(현재가 / 편입일 ETF 종가 − 1) × 100 — 시장가 baseline"),
                 'BM명': st.column_config.TextColumn('BM', width='small'),
                 'BM수익률%': st.column_config.NumberColumn('BM 수익률 %', format='%+.2f'),
-                '초과성과%': st.column_config.NumberColumn('초과성과 %', format='%+.2f'),
+                '초과성과%': st.column_config.NumberColumn(
+                    '초과성과 %', format='%+.2f',
+                    help="ETF 수익률 − BM 수익률 (시장 baseline 기준)"),
             },
         )
 
