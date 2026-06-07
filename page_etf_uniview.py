@@ -683,6 +683,17 @@ def _ap_upload_section():
 
 SENTIMENT_ICONS = {'positive': '🟢', 'negative': '🔴', 'neutral': '🟡'}
 
+# 뉴스/센티먼트 쿼리에서 제외할 종목명 키워드 (현금성 / 예금성 / 비-증권)
+SENTIMENT_EXCLUDE_NAME_KEYWORDS = ('은대', '보통예금', '현금', 'MMF')
+
+
+def _is_sentiment_exempt(name: str) -> bool:
+    """예금·현금 등 뉴스 분석 대상이 아닌 항목인지 판정."""
+    if not isinstance(name, str):
+        return False
+    return any(k in name for k in SENTIMENT_EXCLUDE_NAME_KEYWORDS)
+
+
 # KOSPI200 ETF 판정 시 다른 지수/규모 키워드 제외 (오탐 방지)
 _KOSPI200_EXCLUDE_KEYWORDS = (
     '코스닥', 'KOSDAQ', 'S&P', '500', '나스닥', 'NASDAQ',
@@ -749,6 +760,8 @@ def _collect_sentiment_targets(enriched: pd.DataFrame,
         for _, row in enriched.iterrows():
             name = row.get('종목명', '') or ''
             ticker = str(row.get('티커', '') or '').strip()
+            if _is_sentiment_exempt(name):
+                continue  # 은대 / 보통예금 / MMF 등 — 뉴스 분석 대상 아님
             if _is_kospi200_etf(name):
                 has_k200 = True
                 continue
@@ -763,6 +776,8 @@ def _collect_sentiment_targets(enriched: pd.DataFrame,
         for pos in saved.get('positions', []):
             name = str(pos.get('representative', '') or '')
             cat = str(pos.get('category', '') or '').strip()
+            if _is_sentiment_exempt(name):
+                continue
             if _is_kospi200_etf(name):
                 has_k200 = True
             elif cat and cat not in ('코스피200 베타',):
