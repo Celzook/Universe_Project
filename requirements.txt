@@ -8,3 +8,5 @@ yfinance
 streamlit
 plotly
 lxml
+# AP 분석 — 섹터/KOSPI200 뉴스 센티먼트 요약 (Anthropic Claude haiku)
+anthropic>=0.40

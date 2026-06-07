@@ -10,6 +10,7 @@ ETF Uniview Page
 """
 import hashlib
 import json
+import re
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -571,6 +572,197 @@ def _ap_upload_section():
             st.caption("👉 가공 로직은 추후 연결 — `st.session_state['ap_df']` 로 접근 가능.")
 
 
+# ── 보유 섹터·KOSPI200 이슈/센티먼트 ────────────────────────────────────
+
+SENTIMENT_ICONS = {'positive': '🟢', 'negative': '🔴', 'neutral': '🟡'}
+
+# KOSPI200 ETF 판정 시 다른 지수/규모 키워드 제외 (오탐 방지)
+_KOSPI200_EXCLUDE_KEYWORDS = (
+    '코스닥', 'KOSDAQ', 'S&P', '500', '나스닥', 'NASDAQ',
+    'NIKKEI', 'CSI', 'CHINA', '미국', '글로벌', 'GLOBAL',
+    'MSCI', '신흥', 'EMERGING', '인버스', '레버리지',
+    '2X', '3X', '곱버스', '일본', '유럽', '베트남', '인도',
+)
+
+# 200 토큰 정규식 (단어 경계 또는 비숫자 인접)
+_KOSPI200_TOKEN_RE = re.compile(r'(?:^|[^\d])200(?:$|[^\d])')
+
+
+def _is_kospi200_etf(etf_name: str) -> bool:
+    """ETF명 패턴으로 KOSPI200 판정. '200' 토큰 + 타지수/레버리지 키워드 제외."""
+    if not isinstance(etf_name, str):
+        return False
+    n = etf_name.upper()
+    if any(k.upper() in n for k in _KOSPI200_EXCLUDE_KEYWORDS):
+        return False
+    return bool(_KOSPI200_TOKEN_RE.search(n))
+
+
+def _render_sentiment_card(label: str, result: dict):
+    icon = SENTIMENT_ICONS.get(result.get('sentiment', 'neutral'), '🟡')
+    with st.container(border=True):
+        st.markdown(f"### {icon} {label}")
+        if result.get('error'):
+            st.warning(result['error'])
+        else:
+            summary = result.get('summary', '').strip()
+            if summary:
+                # 1줄 1bullet 으로 변환
+                for line in summary.split('\n'):
+                    line = line.strip().lstrip('-•').strip()
+                    if line:
+                        st.markdown(f"- {line}")
+            else:
+                st.caption("요약 없음")
+            kws = result.get('keywords', [])
+            if kws:
+                tags = ' '.join(f"`{k}`" for k in kws if k)
+                st.markdown(f"**키워드**: {tags}")
+        headlines = result.get('headlines', [])
+        if headlines:
+            with st.expander(f"📰 원본 헤드라인 {min(len(headlines), 5)}건"):
+                for h in headlines[:5]:
+                    title = h.get('title', '')
+                    link = h.get('link', '')
+                    pub = h.get('pubDate', '')[:16]
+                    if title and link:
+                        st.markdown(f"- [{title}]({link}) — _{pub}_")
+
+
+def _collect_sentiment_targets(enriched: pd.DataFrame,
+                               df_uni: pd.DataFrame) -> tuple:
+    """AP + 저장 MP 보유 종목을 합쳐서 (has_kospi200, sectors_set) 반환."""
+    has_k200 = False
+    sectors = set()
+
+    cat_map = (df_uni['중카테고리'].astype(str).to_dict()
+               if '중카테고리' in df_uni.columns else {})
+
+    if isinstance(enriched, pd.DataFrame) and not enriched.empty:
+        for _, row in enriched.iterrows():
+            name = row.get('종목명', '') or ''
+            ticker = str(row.get('티커', '') or '').strip()
+            if _is_kospi200_etf(name):
+                has_k200 = True
+                continue
+            if ticker and ticker in cat_map:
+                cat = cat_map.get(ticker, '').strip()
+                if cat:
+                    sectors.add(cat)
+
+    # 저장된 MP 포지션도 포함
+    saved = load_mp()
+    if saved:
+        for pos in saved.get('positions', []):
+            name = str(pos.get('representative', '') or '')
+            cat = str(pos.get('category', '') or '').strip()
+            if _is_kospi200_etf(name):
+                has_k200 = True
+            elif cat and cat not in ('코스피200 베타',):
+                sectors.add(cat)
+
+    return has_k200, sectors
+
+
+def _ap_sentiment_section(enriched: pd.DataFrame, df_uni: pd.DataFrame):
+    """🔎 AP + MP 보유 섹터·KOSPI200 이슈/센티먼트 — 6h 캐시, 버튼 트리거."""
+    if not isinstance(enriched, pd.DataFrame) or enriched.empty:
+        return
+    try:
+        from news_sentiment import (
+            get_sector_sentiment, get_kospi200_sentiment, keys_configured,
+        )
+    except ImportError as e:
+        st.warning(f"news_sentiment 모듈 로드 실패: {e}")
+        return
+
+    st.markdown("---")
+    st.subheader("🔎 보유 섹터·KOSPI200 이슈 / 센티먼트")
+    st.caption("네이버 뉴스 검색 → Claude(haiku) 3줄 요약. 6시간 캐시.")
+
+    keys = keys_configured()
+    if not (keys['naver'] and keys['anthropic']):
+        with st.expander("⚙️ API 키 설정 가이드 (펼쳐서 확인)", expanded=True):
+            st.markdown(
+                f"""
+이 기능을 사용하려면 두 가지 API 키가 필요합니다.
+
+**설정 위치** (택 1):
+- `.streamlit/secrets.toml` (로컬·Streamlit Cloud 공통)
+- 환경 변수
+
+```toml
+# .streamlit/secrets.toml
+anthropic_api_key = "sk-ant-..."
+naver_news_client_id = "..."
+naver_news_client_secret = "..."
+```
+
+**발급처**
+- Anthropic: https://console.anthropic.com (Console → API Keys)
+- 네이버 개발자 센터: https://developers.naver.com → 애플리케이션 등록 →
+  사용 API 에 **검색** 추가
+
+**현재 상태**
+- 네이버 뉴스 키: {'✅ 설정됨' if keys['naver'] else '❌ 미설정'}
+- Anthropic 키: {'✅ 설정됨' if keys['anthropic'] else '❌ 미설정'}
+                """
+            )
+        return
+
+    has_k200, sectors = _collect_sentiment_targets(enriched, df_uni)
+    if not has_k200 and not sectors:
+        st.caption("KOSPI200 ETF 도 매핑된 섹터 ETF 도 발견되지 않았습니다.")
+        return
+
+    summary_chip = []
+    if has_k200:
+        summary_chip.append("KOSPI200 (매크로)")
+    summary_chip.extend(sorted(sectors))
+    st.caption(f"대상 ({len(summary_chip)}): " + ", ".join(f"`{s}`" for s in summary_chip))
+
+    col_b1, col_b2 = st.columns([1, 4])
+    with col_b1:
+        run = st.button("🔎 이슈 불러오기", type='primary', key='ap_sent_run',
+                        help="6시간 캐시 — 같은 섹터·키워드는 재호출 없음.")
+    with col_b2:
+        if st.button("🔁 캐시 무시 새로고침", key='ap_sent_refresh',
+                     help="강제로 새 뉴스 fetch + LLM 재요약 (캐시 초기화)."):
+            get_sector_sentiment.clear()
+            get_kospi200_sentiment.clear()
+            from news_sentiment import fetch_naver_news
+            fetch_naver_news.clear()
+            st.session_state['ap_sentiment_loaded'] = True
+            run = True
+
+    if run:
+        st.session_state['ap_sentiment_loaded'] = True
+
+    if not st.session_state.get('ap_sentiment_loaded'):
+        st.caption("👆 버튼을 눌러 뉴스 요약을 불러오세요.")
+        return
+
+    if has_k200:
+        with st.spinner("KOSPI200 / 한국 매크로 뉴스 요약..."):
+            try:
+                result = get_kospi200_sentiment()
+            except Exception as e:
+                result = {'error': f"{type(e).__name__}: {e}",
+                          'sentiment': 'neutral', 'summary': '',
+                          'keywords': [], 'headlines': []}
+        _render_sentiment_card("KOSPI200 / 한국 증시 매크로", result)
+
+    for sector in sorted(sectors):
+        with st.spinner(f"'{sector}' 섹터 뉴스 요약..."):
+            try:
+                result = get_sector_sentiment(sector)
+            except Exception as e:
+                result = {'error': f"{type(e).__name__}: {e}",
+                          'sentiment': 'neutral', 'summary': '',
+                          'keywords': [], 'headlines': []}
+        _render_sentiment_card(f"{sector} 섹터", result)
+
+
 def _compute_mp_port_excess():
     """저장된 MP 의 포트폴리오 비중 가중 누적 초과수익률(% vs KOSPI) 계산.
 
@@ -789,6 +981,9 @@ def _ap_processing_section(df_uni: pd.DataFrame):
 
     # ── AP vs MP 포트폴리오 수준 비교 ──────────────────────────────────────
     _render_ap_mp_comparison(enriched)
+
+    # ── 🔎 보유 섹터·KOSPI200 이슈/센티먼트 ───────────────────────────────
+    _ap_sentiment_section(enriched, df_uni)
 
 
 def _score_color(c: float) -> str:
