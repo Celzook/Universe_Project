@@ -358,7 +358,7 @@ def _cached_etf_close_series(ticker: str, start_str: str, end_str: str) -> pd.Se
 
 @st.cache_data(ttl=3600 * 2, show_spinner=False)
 def _cached_kospi200_close(start_str: str, end_str: str) -> pd.Series:
-    """KOSPI200 일별 종가. 네이버 (KPI200/KOSPI200) → yfinance ^KS200 폴백."""
+    """KOSPI200 일별 종가. 네이버 KPI200 → yfinance ^KS200 폴백. (실제 지수)"""
     from etf_universe_builder import naver_get_index_history
     for sym in ('KPI200', 'KOSPI200'):
         try:
@@ -367,7 +367,6 @@ def _cached_kospi200_close(start_str: str, end_str: str) -> pd.Series:
                 return s
         except Exception:
             pass
-    # yfinance 폴백
     try:
         import yfinance as yf
         s_iso = f"{start_str[:4]}-{start_str[4:6]}-{start_str[6:8]}"
@@ -379,6 +378,36 @@ def _cached_kospi200_close(start_str: str, end_str: str) -> pd.Series:
     except Exception:
         pass
     return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=3600 * 2, show_spinner=False)
+def _cached_kospi_close(start_str: str, end_str: str) -> pd.Series:
+    """KOSPI 종합지수 일별 종가. 네이버 KOSPI → yfinance ^KS11 폴백. (실제 지수)"""
+    from etf_universe_builder import naver_get_index_history
+    try:
+        s = naver_get_index_history('KOSPI', start_str, end_str)
+        if isinstance(s, pd.Series) and not s.empty:
+            return s
+    except Exception:
+        pass
+    try:
+        import yfinance as yf
+        s_iso = f"{start_str[:4]}-{start_str[4:6]}-{start_str[6:8]}"
+        e_iso = f"{end_str[:4]}-{end_str[4:6]}-{end_str[6:8]}"
+        df = yf.download('^KS11', start=s_iso, end=e_iso,
+                         progress=False, auto_adjust=True)
+        if not df.empty and 'Close' in df.columns:
+            return df['Close'].squeeze().dropna()
+    except Exception:
+        pass
+    return pd.Series(dtype=float)
+
+
+# 분류 → BM 매핑 (UI 라벨)
+_BM_NAME_BY_CATEGORY = {
+    '인덱스 재간접주식형': 'KOSPI200',
+    '액티브 재간접주식형': 'KOSPI',
+}
 
 
 def _parse_ap_for_analysis(ap_df: pd.DataFrame, df_uni: pd.DataFrame) -> pd.DataFrame:
@@ -454,19 +483,37 @@ def _parse_ap_for_analysis(ap_df: pd.DataFrame, df_uni: pd.DataFrame) -> pd.Data
     return pd.DataFrame(rows)
 
 
-def _enrich_with_returns(agg_df: pd.DataFrame, bm_close: pd.Series, end_str: str) -> pd.DataFrame:
-    """편입일~오늘 ETF 수익률 + KOSPI200 BM 수익률 + 초과성과 계산."""
+def _enrich_with_returns(agg_df: pd.DataFrame,
+                         bm_by_category: dict,
+                         end_str: str) -> pd.DataFrame:
+    """편입일~오늘 ETF 수익률 + 분류별 BM 수익률 + 초과성과 계산.
+
+    Parameters
+    ----------
+    bm_by_category : dict[str, pd.Series]
+        {'인덱스 재간접주식형': KOSPI200_close, '액티브 재간접주식형': KOSPI_close}
+        분류별로 다른 BM 사용 — 각 행의 '분류' 값에 따라 매핑.
+    """
     if agg_df is None or agg_df.empty:
         return agg_df
 
     out = agg_df.copy()
-    bm_latest = float(bm_close.iloc[-1]) if not bm_close.empty else np.nan
+    # 분류별 BM 최신가 캐시
+    bm_latest_by_cat = {
+        cat: float(s.iloc[-1]) if isinstance(s, pd.Series) and not s.empty else np.nan
+        for cat, s in bm_by_category.items()
+    }
 
-    cur, ret_pcts, bm_pcts, excess_pcts = [], [], [], []
+    cur, ret_pcts, bm_pcts, excess_pcts, bm_names = [], [], [], [], []
     for _, row in out.iterrows():
         ticker = str(row.get('티커') or '').strip()
         inception = row.get('편입일')
         avg_cost = row.get('가중평균단가')
+        category = str(row.get('분류') or '')
+
+        bm_close = bm_by_category.get(category, pd.Series(dtype=float))
+        bm_latest = bm_latest_by_cat.get(category, np.nan)
+        bm_name = _BM_NAME_BY_CATEGORY.get(category, '?')
 
         c_now = np.nan
         r_pct = np.nan
@@ -483,7 +530,8 @@ def _enrich_with_returns(agg_df: pd.DataFrame, bm_close: pd.Series, end_str: str
                 if avg_cost and not pd.isna(avg_cost) and avg_cost > 0:
                     r_pct = (c_now / avg_cost - 1.0) * 100
 
-        if not pd.isna(inception) and not bm_close.empty and not np.isnan(bm_latest):
+        if not pd.isna(inception) and isinstance(bm_close, pd.Series) \
+                and not bm_close.empty and not np.isnan(bm_latest):
             inc_ts = pd.Timestamp(inception)
             after = bm_close.index[bm_close.index >= inc_ts]
             if len(after) > 0:
@@ -497,9 +545,11 @@ def _enrich_with_returns(agg_df: pd.DataFrame, bm_close: pd.Series, end_str: str
         ret_pcts.append(r_pct)
         bm_pcts.append(bm_r)
         excess_pcts.append(excess)
+        bm_names.append(bm_name)
 
     out['현재가'] = cur
     out['수익률%'] = ret_pcts
+    out['BM명'] = bm_names
     out['BM수익률%'] = bm_pcts
     out['초과성과%'] = excess_pcts
     return out
@@ -828,8 +878,9 @@ def _render_ap_mp_comparison(enriched: pd.DataFrame):
         f"{ap_ret:+.2f}%" if not np.isnan(ap_ret) else "N/A",
     )
     c2.metric(
-        "AP 비중 가중 초과성과 (vs KOSPI200)",
+        "AP 비중 가중 초과성과 (혼합 BM)",
         f"{ap_excess:+.2f}%" if not np.isnan(ap_excess) else "N/A",
+        help="인덱스 = vs KOSPI200, 액티브 = vs KOSPI 의 비중 가중 평균",
     )
     if mp_info:
         c3.metric(
@@ -849,8 +900,8 @@ def _render_ap_mp_comparison(enriched: pd.DataFrame):
         c4.metric("차이 (AP − MP)", "N/A", help="저장된 MP 없음")
 
     st.caption(
-        "AP 의 BM 은 KOSPI200, MP 의 BM 은 KOSPI (저장 MP 기존 계산 유지). "
-        "둘 다 한국 대형주 지수로 근사 비교. 엄밀 일치 필요 시 BM 통일 요청 바람."
+        "AP 분류별 BM: 인덱스 재간접 → KOSPI200 / 액티브 재간접 → KOSPI. "
+        "MP BM: KOSPI (저장 MP 기존 계산 유지). 모든 BM 은 실제 지수값."
     )
 
 
@@ -870,11 +921,14 @@ def _ap_processing_section(df_uni: pd.DataFrame):
 - **집계**: 분류별 × 종목명별 — 적용평가액 sum, 비중%, 최초 매수일.
 - **가중평균단가**: ETF 그룹별 `SUM(원취득가액) / SUM(액면수량)` (표준 평균단가).
 - **수익률**: `(현재가 / 가중평균단가 − 1) × 100`
-- **BM**: KOSPI200 (편입일 직후 첫 영업일 종가 → 최신). 인덱스/액티브 모두
-  현재 KOSPI200 임시 사용 — 액티브 BM 변경 필요 시 알려주세요.
-- **초과성과**: ETF 수익률 − KOSPI200 수익률.
-- **포트폴리오 비교**: 분류 무관 전체 AP 의 비중 가중 초과성과를
-  저장된 MP 의 비중 가중 초과성과와 비교.
+- **BM** (분류별 분리):
+  - 인덱스 재간접주식형 → **KOSPI200** (네이버 KPI200 / yfinance `^KS200`)
+  - 액티브 재간접주식형 → **KOSPI** (네이버 KOSPI / yfinance `^KS11`)
+  - 둘 다 실제 지수 데이터 (EWY 등 ETF 대용 아님). 편입일 직후 첫 영업일
+    종가 → 최신 종가 비교.
+- **초과성과**: ETF 수익률 − 해당 분류 BM 수익률 (행별 `BM명` 컬럼 참고).
+- **포트폴리오 비교**: 전체 AP 비중 가중 초과성과(혼합 BM)를 저장 MP
+  비중 가중 초과성과(KOSPI BM)와 대조.
         """)
 
     run = st.button("🚀 분석 실행", type='primary', key='ap_run',
@@ -894,14 +948,20 @@ def _ap_processing_section(df_uni: pd.DataFrame):
             min_incept = pd.Timestamp(agg_df['편입일'].min())
             bm_start = (min_incept - pd.Timedelta(days=10)).strftime('%Y%m%d')
 
-            with st.spinner("KOSPI200 BM 가격 수집..."):
-                bm_close = _cached_kospi200_close(bm_start, end_str)
-            if bm_close.empty:
-                st.error("KOSPI200 가격 수집 실패 (네이버·yfinance 모두 응답 없음). "
-                         "BM 수익률은 NaN 으로 채워집니다.")
+            with st.spinner("BM 지수 수집 (KOSPI / KOSPI200)..."):
+                bm_kospi200 = _cached_kospi200_close(bm_start, end_str)
+                bm_kospi = _cached_kospi_close(bm_start, end_str)
+            if bm_kospi200.empty:
+                st.error("KOSPI200 가격 수집 실패 → 인덱스 그룹 BM/초과성과 NaN.")
+            if bm_kospi.empty:
+                st.error("KOSPI 가격 수집 실패 → 액티브 그룹 BM/초과성과 NaN.")
+            bm_by_cat = {
+                '인덱스 재간접주식형': bm_kospi200,
+                '액티브 재간접주식형': bm_kospi,
+            }
 
             with st.spinner(f"{len(agg_df)}개 종목 가격 수집·수익률 계산..."):
-                enriched = _enrich_with_returns(agg_df, bm_close, end_str)
+                enriched = _enrich_with_returns(agg_df, bm_by_cat, end_str)
 
             with st.spinner("저장된 MP 포트폴리오 누적 초과수익률 계산..."):
                 st.session_state['ap_mp_compare'] = _compute_mp_port_excess()
@@ -937,15 +997,17 @@ def _ap_processing_section(df_uni: pd.DataFrame):
         n_unmapped = int((sub['티커'] == '').sum() + sub['현재가'].isna().sum()
                          - ((sub['티커'] == '') & sub['현재가'].isna()).sum())
 
+        bm_name = _BM_NAME_BY_CATEGORY.get(label, '?')
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("종목 수", f"{len(sub)}")
         c2.metric("총 적용평가액", f"{total_val:,.0f}")
-        c3.metric("비중 가중 초과성과 (vs KOSPI200)",
+        c3.metric(f"비중 가중 초과성과 (vs {bm_name})",
                   f"{wavg_excess:+.2f}%" if not np.isnan(wavg_excess) else "N/A")
         c4.metric("매핑/가격 실패", f"{n_unmapped}개")
 
         view = sub[['종목명', '티커', '적용평가액', '비중%', '편입일', '가중평균단가',
-                    '현재가', '수익률%', 'BM수익률%', '초과성과%']].copy()
+                    '현재가', '수익률%', 'BM명', 'BM수익률%', '초과성과%']].copy()
         view['편입일'] = pd.to_datetime(view['편입일']).dt.strftime('%Y-%m-%d')
         st.dataframe(
             view.sort_values('비중%', ascending=False),
@@ -957,7 +1019,8 @@ def _ap_processing_section(df_uni: pd.DataFrame):
                 '가중평균단가': st.column_config.NumberColumn('가중평균단가', format='%,.2f'),
                 '현재가': st.column_config.NumberColumn('현재가', format='%,.2f'),
                 '수익률%': st.column_config.NumberColumn('수익률 %', format='%+.2f'),
-                'BM수익률%': st.column_config.NumberColumn('BM(KOSPI200) %', format='%+.2f'),
+                'BM명': st.column_config.TextColumn('BM', width='small'),
+                'BM수익률%': st.column_config.NumberColumn('BM 수익률 %', format='%+.2f'),
                 '초과성과%': st.column_config.NumberColumn('초과성과 %', format='%+.2f'),
             },
         )
