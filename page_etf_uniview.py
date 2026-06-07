@@ -326,7 +326,12 @@ AP_COL_X_BUY_DATE = 23     # 최초 매수일자 (편입일)
 
 
 # 액티브 재간접주식형 — 제외 키워드 (해당 종목명 행은 분석에서 drop)
-AP_ACTIVE_EXCLUDE_KEYWORDS = ('더제이 더행복코리아', '더행복코리아 공모펀드')
+# '더제이' 한 토큰만으로 '더제이 더행복코리아', '더제이 공모펀드' 등 전부 포함.
+AP_ACTIVE_EXCLUDE_KEYWORDS = (
+    '더제이',
+    '더행복코리아',
+    'PLUS ESG 성장주 액티브',
+)
 
 # 액티브 재간접주식형 — 종목명 통합 매핑 (보통예금 ↔ 은대 → 은대 하나로)
 AP_ACTIVE_NAME_UNIFY = (
@@ -547,12 +552,20 @@ def _enrich_with_returns(agg_df: pd.DataFrame,
         for cat, s in bm_by_category.items()
     }
 
-    cur, ret_pcts, bm_pcts, excess_pcts, bm_names = [], [], [], [], []
+    today_ts = pd.Timestamp.today().normalize()
+    cur, ret_pcts, bm_pcts, excess_pcts, bm_names, hold_days = [], [], [], [], [], []
     for _, row in out.iterrows():
         ticker = str(row.get('티커') or '').strip()
         inception = row.get('편입일')
         avg_cost = row.get('가중평균단가')
         category = str(row.get('분류') or '')
+
+        # 보유기간 (일) — 편입일 ~ 오늘
+        if pd.isna(inception):
+            hold_days.append(np.nan)
+        else:
+            d = (today_ts - pd.Timestamp(inception)).days
+            hold_days.append(int(d) if d >= 0 else np.nan)
 
         bm_close = bm_by_category.get(category, pd.Series(dtype=float))
         bm_latest = bm_latest_by_cat.get(category, np.nan)
@@ -590,6 +603,7 @@ def _enrich_with_returns(agg_df: pd.DataFrame,
         excess_pcts.append(excess)
         bm_names.append(bm_name)
 
+    out['보유기간(일)'] = hold_days
     out['현재가'] = cur
     out['수익률%'] = ret_pcts
     out['BM명'] = bm_names
@@ -1052,8 +1066,9 @@ def _ap_processing_section(df_uni: pd.DataFrame):
                   f"{wavg_excess:+.2f}%" if not np.isnan(wavg_excess) else "N/A")
         c4.metric("매핑/가격 실패", f"{n_unmapped}개")
 
-        view = sub[['종목명', '티커', '적용평가액', '비중%', '편입일', '가중평균단가',
-                    '현재가', '수익률%', 'BM명', 'BM수익률%', '초과성과%']].copy()
+        view = sub[['종목명', '티커', '적용평가액', '비중%', '편입일', '보유기간(일)',
+                    '가중평균단가', '현재가', '수익률%', 'BM명', 'BM수익률%',
+                    '초과성과%']].copy()
         view['편입일'] = pd.to_datetime(view['편입일']).dt.strftime('%Y-%m-%d')
         st.dataframe(
             view.sort_values('비중%', ascending=False),
@@ -1062,6 +1077,9 @@ def _ap_processing_section(df_uni: pd.DataFrame):
                 '적용평가액': st.column_config.NumberColumn('적용평가액', format='%,.0f'),
                 '비중%': st.column_config.ProgressColumn(
                     '비중 %', min_value=0.0, max_value=100.0, format='%.2f%%'),
+                '보유기간(일)': st.column_config.NumberColumn(
+                    '보유기간 (일)', format='%d',
+                    help="편입일 → 오늘. 수익률·BM수익률 모두 이 기간의 누적값입니다."),
                 '가중평균단가': st.column_config.NumberColumn('가중평균단가', format='%,.2f'),
                 '현재가': st.column_config.NumberColumn('현재가', format='%,.2f'),
                 '수익률%': st.column_config.NumberColumn('수익률 %', format='%+.2f'),
