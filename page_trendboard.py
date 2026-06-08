@@ -10,10 +10,25 @@ ETF Trend Board Page
 Phase B/C 에서 추가 예정: 기초지수(네이버 파싱) / 자금유입(KRX 설정·환매)
 """
 from __future__ import annotations
+import html as _html
 import pandas as pd
 import numpy as np
 import streamlit as st
 from datetime import datetime, timedelta
+
+
+def _safe_str(v) -> str:
+    """NaN / None / float → 안전한 str 변환 (truthy NaN 가드)."""
+    if v is None:
+        return ''
+    if isinstance(v, float) and np.isnan(v):
+        return ''
+    return str(v)
+
+
+def _esc(v) -> str:
+    """HTML attribute / 텍스트 안전 escape."""
+    return _html.escape(_safe_str(v), quote=True)
 
 try:
     from style import UP_COLOR, DOWN_COLOR
@@ -234,9 +249,9 @@ def _render_card(slot_num: int, etf_row, ticker, ret_col, period_label, bm_col,
     """Top 6 카드 1개 렌더 (테마 적응 + 가독성 강조).
 
     third_label/value/color : 3번째 메트릭을 RS 대신 강제 표시 (예: 전일대비 거래)."""
-    name = etf_row.get('ETF명', '') if isinstance(etf_row.get('ETF명'), str) else ''
-    cat = etf_row.get('중카테고리', '') or etf_row.get('대카테고리', '')
-    manager = etf_row.get('운용사', '')
+    name = _safe_str(etf_row.get('ETF명', ''))
+    cat = _safe_str(etf_row.get('중카테고리', '')) or _safe_str(etf_row.get('대카테고리', ''))
+    manager = _safe_str(etf_row.get('운용사', ''))
     close = etf_row.get('종가', np.nan)
     today = etf_row.get('오늘등락(%)', np.nan)
     period_ret = etf_row.get(ret_col, np.nan)
@@ -257,22 +272,25 @@ def _render_card(slot_num: int, etf_row, ticker, ret_col, period_label, bm_col,
     else:
         name_fs = 13
 
+    name_safe = _esc(name)
+    sub_txt = f"{_safe_str(ticker)} · {cat or '-'}{(' · ' + manager) if manager else ''}"
+    sub_safe = _esc(sub_txt)
+
     with st.container(border=True):
         h1, h2 = st.columns([4, 1])
         with h1:
             # ETF 이름 — 단일 라인 ellipsis + 길이 기반 폰트 스케일
             st.markdown(
-                f"<div title='{name}' style='font-size:{name_fs}px;"
+                f"<div title=\"{name_safe}\" style='font-size:{name_fs}px;"
                 f"font-weight:700;line-height:1.25;letter-spacing:-0.02em;"
                 f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
-                f"margin:2px 0 0 0'>{name}</div>",
+                f"margin:2px 0 0 0'>{name_safe}</div>",
                 unsafe_allow_html=True,
             )
-            sub_txt = f"{ticker} · {cat or '-'}{(' · ' + manager) if manager else ''}"
             st.markdown(
-                f"<div title='{sub_txt}' style='font-size:11px;color:#888;"
+                f"<div title=\"{sub_safe}\" style='font-size:11px;color:#888;"
                 f"line-height:1.2;white-space:nowrap;overflow:hidden;"
-                f"text-overflow:ellipsis;margin:2px 0 0 0'>{sub_txt}</div>",
+                f"text-overflow:ellipsis;margin:2px 0 0 0'>{sub_safe}</div>",
                 unsafe_allow_html=True,
             )
         with h2:

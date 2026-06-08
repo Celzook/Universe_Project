@@ -41,6 +41,11 @@ try:
     _HAS_HISTORY = True
 except ImportError:
     _HAS_HISTORY = False
+try:
+    from page_chart_matrix import page_chart_matrix
+    _HAS_CHART_MATRIX = True
+except ImportError:
+    _HAS_CHART_MATRIX = False
 
 
 # ============================================================================
@@ -167,6 +172,8 @@ def render_sidebar():
     menu_items = ["유니버스 탐색", "구성종목(PDF) 분석", "수익률 비교"]
     if _HAS_UNIVIEW:
         menu_items.append("🔭 ETF Uniview")
+    if _HAS_CHART_MATRIX:
+        menu_items.append("📊 차트 매트릭스")
     if _HAS_TRENDBOARD:
         menu_items.append("🗂️ ETF 트렌드보드")
     if _HAS_HISTORY:
@@ -855,6 +862,7 @@ def main():
     elif page == "구성종목(PDF) 분석": page_pdf()
     elif page == "수익률 비교": page_returns()
     elif page == "🔭 ETF Uniview" and _HAS_UNIVIEW: page_etf_uniview()
+    elif page == "📊 차트 매트릭스" and _HAS_CHART_MATRIX: page_chart_matrix()
     elif page == "🗂️ ETF 트렌드보드" and _HAS_TRENDBOARD: page_trendboard()
     elif page == "📜 MP History" and _HAS_HISTORY: page_history()
 
