@@ -246,12 +246,35 @@ def _render_card(slot_num: int, etf_row, ticker, ret_col, period_label, bm_col,
     today_color = _color_pct(today)
     bm_color = _color_pct(bm)
 
+    # ETF명 길이에 따라 폰트 크기 스케일 (들쭉날쭉 방지)
+    name_len = len(name)
+    if name_len <= 10:
+        name_fs = 19
+    elif name_len <= 16:
+        name_fs = 17
+    elif name_len <= 22:
+        name_fs = 15
+    else:
+        name_fs = 13
+
     with st.container(border=True):
         h1, h2 = st.columns([4, 1])
         with h1:
-            # ETF 이름 — native 헤딩 (검은색 on light, 흰색 on dark)
-            st.markdown(f"#### {name}")
-            st.caption(f"`{ticker}` · {cat or '-'}{(' · ' + manager) if manager else ''}")
+            # ETF 이름 — 단일 라인 ellipsis + 길이 기반 폰트 스케일
+            st.markdown(
+                f"<div title='{name}' style='font-size:{name_fs}px;"
+                f"font-weight:700;line-height:1.25;letter-spacing:-0.02em;"
+                f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+                f"margin:2px 0 0 0'>{name}</div>",
+                unsafe_allow_html=True,
+            )
+            sub_txt = f"{ticker} · {cat or '-'}{(' · ' + manager) if manager else ''}"
+            st.markdown(
+                f"<div title='{sub_txt}' style='font-size:11px;color:#888;"
+                f"line-height:1.2;white-space:nowrap;overflow:hidden;"
+                f"text-overflow:ellipsis;margin:2px 0 0 0'>{sub_txt}</div>",
+                unsafe_allow_html=True,
+            )
         with h2:
             st.markdown(
                 f"<div style='text-align:right;margin-top:6px'>"

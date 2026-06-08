@@ -26,6 +26,29 @@ html, body, [class*="st-"], .stApp, .stMarkdown,
     letter-spacing: -0.01em;
 }
 
+/* ── Material Icons 보호 (expander 화살표 등) ─────────────────
+   위 [class*="st-"] !important 규칙이 Streamlit 의 Material Symbols
+   폰트까지 덮어써서 "_arrow_right_" 같은 ligature 가 raw text 로
+   노출되는 현상 방지. */
+[data-testid="stIconMaterial"],
+.material-symbols-outlined,
+.material-symbols-rounded,
+.material-symbols-sharp,
+.material-icons,
+.material-icons-outlined,
+.material-icons-rounded,
+.material-icons-sharp,
+[class*="st-"] [data-testid="stIconMaterial"],
+[class*="st-"] .material-symbols-outlined,
+[class*="st-"] .material-icons {
+    font-family: 'Material Symbols Outlined',
+                 'Material Symbols Rounded',
+                 'Material Icons',
+                 'Material Icons Outlined' !important;
+    font-feature-settings: 'liga' !important;
+    letter-spacing: 0 !important;
+}
+
 /* ── 카드 컨테이너 (st.container border=True) ───────────────── */
 [data-testid="stVerticalBlockBorderWrapper"] {
     border-radius: 14px !important;
