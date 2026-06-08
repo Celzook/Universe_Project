@@ -1,0 +1,62 @@
+[
+  {
+    "date": "2026-06-08",
+    "nav_krw": 100000000000.0,
+    "nav_pct": 0.0,
+    "active_sat_count": 5,
+    "n_trades_total": 0,
+    "inception_date": "2026-06-08",
+    "method": "A",
+    "mode": "A",
+    "positions": [
+      {
+        "ticker": "102110",
+        "representative": "TIGER 200",
+        "category": "코스피200 베타",
+        "role": "Core",
+        "status": "active",
+        "weight_pct": 87.5
+      },
+      {
+        "ticker": "456600",
+        "representative": "TIME 글로벌AI인공지능액티브",
+        "category": "글로벌/선진국",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 2.6070252469813386
+      },
+      {
+        "ticker": "138530",
+        "representative": "TIGER LG그룹플러스",
+        "category": "LG그룹",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 2.5246981339187697
+      },
+      {
+        "ticker": "261240",
+        "representative": "KODEX 미국달러선물",
+        "category": "달러",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 2.517837541163557
+      },
+      {
+        "ticker": "292560",
+        "representative": "TIGER 일본엔선물",
+        "category": "엔화",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 2.462952799121844
+      },
+      {
+        "ticker": "360750",
+        "representative": "TIGER 미국S&P500",
+        "category": "미국",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 2.3874862788144893
+      }
+    ]
+  }
+]
