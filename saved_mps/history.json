@@ -181,8 +181,8 @@
   },
   {
     "date": "2026-06-22",
-    "nav_krw": 115669931525.96744,
-    "nav_pct": 15.669931525967428,
+    "nav_krw": 113781864592.24043,
+    "nav_pct": 13.781864592240423,
     "active_sat_count": 5,
     "n_trades_total": 2,
     "inception_date": "2026-06-12",
@@ -195,7 +195,7 @@
         "category": "코스피200 베타",
         "role": "Core",
         "status": "active",
-        "weight_pct": 90.24772388813976
+        "weight_pct": 90.14216266978389
       },
       {
         "ticker": "275300",
@@ -203,7 +203,7 @@
         "category": "퀄리티",
         "role": "Satellite",
         "status": "active",
-        "weight_pct": 2.8480923517160432
+        "weight_pct": 2.8709899939286574
       },
       {
         "ticker": "261240",
@@ -211,7 +211,7 @@
         "category": "달러",
         "role": "Satellite",
         "status": "partial_cut",
-        "weight_pct": 1.115610813901291
+        "weight_pct": 1.1355613019028326
       },
       {
         "ticker": "325010",
@@ -219,7 +219,7 @@
         "category": "성장",
         "role": "Satellite",
         "status": "active",
-        "weight_pct": 2.405572986522056
+        "weight_pct": 2.4197118287088917
       },
       {
         "ticker": "396500",
@@ -227,7 +227,7 @@
         "category": "반도체",
         "role": "Satellite",
         "status": "partial_cut",
-        "weight_pct": 1.0806270454951836
+        "weight_pct": 1.101229177857769
       },
       {
         "ticker": "456600",
@@ -235,7 +235,7 @@
         "category": "글로벌/선진국",
         "role": "Satellite",
         "status": "active",
-        "weight_pct": 2.302372914225671
+        "weight_pct": 2.330345027817969
       }
     ]
   }
