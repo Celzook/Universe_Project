@@ -298,5 +298,65 @@
         "weight_pct": 2.302855849985828
       }
     ]
+  },
+  {
+    "date": "2026-06-29",
+    "nav_krw": 105037379088.48271,
+    "nav_pct": 5.0373790884827185,
+    "active_sat_count": 5,
+    "n_trades_total": 4,
+    "inception_date": "2026-06-12",
+    "method": "A",
+    "mode": "A",
+    "positions": [
+      {
+        "ticker": "102110",
+        "representative": "TIGER 200",
+        "category": "코스피200 베타",
+        "role": "Core",
+        "status": "active",
+        "weight_pct": 92.08305864250104
+      },
+      {
+        "ticker": "275300",
+        "representative": "KODEX 우량주",
+        "category": "퀄리티",
+        "role": "Satellite",
+        "status": "partial_cut",
+        "weight_pct": 1.4138092307580108
+      },
+      {
+        "ticker": "261240",
+        "representative": "KODEX 미국달러선물",
+        "category": "달러",
+        "role": "Satellite",
+        "status": "partial_cut",
+        "weight_pct": 1.233214262244574
+      },
+      {
+        "ticker": "325010",
+        "representative": "KODEX 성장주",
+        "category": "성장",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 2.413714940187213
+      },
+      {
+        "ticker": "396500",
+        "representative": "TIGER 반도체TOP10",
+        "category": "반도체",
+        "role": "Satellite",
+        "status": "partial_cut",
+        "weight_pct": 0.5365085169099344
+      },
+      {
+        "ticker": "456600",
+        "representative": "TIME 글로벌AI인공지능액티브",
+        "category": "글로벌/선진국",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 2.31969440739923
+      }
+    ]
   }
 ]
