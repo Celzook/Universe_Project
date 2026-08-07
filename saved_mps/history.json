@@ -358,5 +358,49 @@
         "weight_pct": 2.31969440739923
       }
     ]
+  },
+  {
+    "date": "2026-08-07",
+    "nav_krw": 77069385824.10356,
+    "nav_pct": -22.930614175896437,
+    "active_sat_count": 3,
+    "n_trades_total": 13,
+    "inception_date": "2026-06-12",
+    "method": "A",
+    "mode": "A",
+    "positions": [
+      {
+        "ticker": "102110",
+        "representative": "TIGER 200",
+        "category": "코스피200 베타",
+        "role": "Core",
+        "status": "active",
+        "weight_pct": 93.56067210360077
+      },
+      {
+        "ticker": "261240",
+        "representative": "KODEX 미국달러선물",
+        "category": "달러",
+        "role": "Satellite",
+        "status": "partial_cut",
+        "weight_pct": 1.551207223261625
+      },
+      {
+        "ticker": "117680",
+        "representative": "KODEX 철강",
+        "category": "철강/금속",
+        "role": "Satellite",
+        "status": "partial_cut",
+        "weight_pct": 1.6678372789836513
+      },
+      {
+        "ticker": "228790",
+        "representative": "TIGER 화장품",
+        "category": "경기소비재/뷰티",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 3.2202833941539666
+      }
+    ]
   }
 ]
