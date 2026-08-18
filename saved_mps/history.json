@@ -446,5 +446,49 @@
         "weight_pct": 3.028529095438515
       }
     ]
+  },
+  {
+    "date": "2026-08-18",
+    "nav_krw": 84868513792.45998,
+    "nav_pct": -15.131486207540023,
+    "active_sat_count": 3,
+    "n_trades_total": 19,
+    "inception_date": "2026-06-12",
+    "method": "A",
+    "mode": "A",
+    "positions": [
+      {
+        "ticker": "102110",
+        "representative": "TIGER 200",
+        "category": "코스피200 베타",
+        "role": "Core",
+        "status": "active",
+        "weight_pct": 94.19281583552521
+      },
+      {
+        "ticker": "261240",
+        "representative": "KODEX 미국달러선물",
+        "category": "달러",
+        "role": "Satellite",
+        "status": "partial_cut",
+        "weight_pct": 1.4038356873407196
+      },
+      {
+        "ticker": "140700",
+        "representative": "KODEX 보험",
+        "category": "보험",
+        "role": "Satellite",
+        "status": "partial_cut",
+        "weight_pct": 1.489655492640515
+      },
+      {
+        "ticker": "0148J0",
+        "representative": "TIGER 코리아휴머노이드로봇산업",
+        "category": "휴머노이드",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 2.9136929844935557
+      }
+    ]
   }
 ]
