@@ -578,5 +578,49 @@
         "weight_pct": 2.755076816556775
       }
     ]
+  },
+  {
+    "date": "2026-08-21",
+    "nav_krw": 85901196534.01132,
+    "nav_pct": -14.098803465988674,
+    "active_sat_count": 3,
+    "n_trades_total": 14,
+    "inception_date": "2026-06-12",
+    "method": "A",
+    "mode": "A",
+    "positions": [
+      {
+        "ticker": "102110",
+        "representative": "TIGER 200",
+        "category": "코스피200 베타",
+        "role": "Core",
+        "status": "active",
+        "weight_pct": 94.86353717260789
+      },
+      {
+        "ticker": "261240",
+        "representative": "KODEX 미국달러선물",
+        "category": "달러",
+        "role": "Satellite",
+        "status": "partial_cut",
+        "weight_pct": 0.6818104353159709
+      },
+      {
+        "ticker": "140700",
+        "representative": "KODEX 보험",
+        "category": "보험",
+        "role": "Satellite",
+        "status": "partial_cut",
+        "weight_pct": 1.4893350276247845
+      },
+      {
+        "ticker": "144600",
+        "representative": "KODEX 은선물(H)",
+        "category": "은",
+        "role": "Satellite",
+        "status": "active",
+        "weight_pct": 2.9653173644513577
+      }
+    ]
   }
 ]
